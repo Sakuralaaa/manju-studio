@@ -337,15 +337,25 @@ func doCall(ctx context.Context, ch *Channel, plan Plan, refs []refFile) (*genRe
 	if len(refsOut) == 0 {
 		return res, errors.New("响应里没有图片：" + upstreamMsg(raw))
 	}
+	var dlErr error
 	for _, ref := range refsOut {
 		data, err := fetchImage(ctx, ch, ref)
 		if err != nil {
 			log.Printf("下载图片失败: %v (%s)", err, logURL(ref))
+			dlErr = err
 			continue
 		}
 		res.images = append(res.images, data)
 	}
 	if len(res.images) == 0 {
+		// 上游已经出图但取不回来：把原因带给界面（401/403 多半是图片地址也要密钥、或密钥不对）
+		if dlErr != nil {
+			why := "网络错误"
+			if m := dlErr.Error(); strings.HasPrefix(m, "下载图片 HTTP") {
+				why = strings.TrimPrefix(m, "下载图片 ")
+			}
+			return res, fmt.Errorf("图片已生成但下载失败（%s）", why)
+		}
 		return res, errors.New("图片下载失败")
 	}
 	return res, nil

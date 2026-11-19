@@ -442,6 +442,7 @@
 .vtune { margin: 0; }
 .vtune .field { margin-bottom: 0; }
 .vcur { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.vcur > span { flex: none; white-space: nowrap; }
 .vcur b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .desc-wrap { position: relative; }
 .desc-wrap.is-busy textarea { opacity: .35; }
@@ -496,7 +497,7 @@
 .mix-sum span { height: 24px; padding: 0 8px; border-radius: 12px; display: inline-flex; align-items: center; background: var(--chip); color: var(--text-2); font-size: 12px; }
 .cover-box { position: relative; width: 100%; border-radius: var(--r-md); overflow: hidden; background: var(--well); margin-bottom: 12px; max-height: 360px; }
 .cover-box.ar-9-16 { aspect-ratio: 3 / 4; }
-.cover-box img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; cursor: default; }
+.cover-box img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; cursor: default; }
 .cover-box.is-busy img { opacity: .35; }
 .sum-text { margin: 0 0 12px; font-size: 13px; line-height: 21px; color: var(--text-2); }
 .sum-text b { color: var(--text); font-weight: 600; margin-right: 4px; }
@@ -577,6 +578,7 @@
   .stable .tr { grid-template-columns: 96px 56px 56px minmax(0, 1fr); }
   .stable .tr > :nth-child(4), .stable .tr > :nth-child(5) { display: none; }
   .vcur b { max-width: 120px; }
+  .inline-warn > span { white-space: normal; line-height: 1.45; padding: 6px 0; }
   .proj-head .btn-primary.btn-sm { padding: 0 10px; }
 }
 @media (max-width: 720px) {
