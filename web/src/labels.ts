@@ -116,3 +116,22 @@ export function fmtSec(sec: number) {
   const m = Math.floor(sec / 60), s = Math.round(sec % 60)
   return s ? `${m} 分 ${s} 秒` : `${m} 分钟`
 }
+
+export const pipeStageNames: Record<string, string> = {
+  idea: '梗概', script: '剧本', assets: '资产', storyboard: '分镜', keyframes: '关键帧', voice: '配音', videos: '视频', final: '成片', wrap: '收尾',
+}
+export const pipeStageOrder = ['idea', 'script', 'assets', 'storyboard', 'keyframes', 'voice', 'videos', 'final', 'wrap']
+export const pipeStatusNames: Record<string, string> = {
+  running: '进行中', confirm: '等你确认', waiting: '等待渲染', done: '已完成', failed: '已中断', canceled: '已停止',
+}
+export const chainNames: Record<string, string> = { off: '不衔接', ref: '参考上一镜', first: '首尾帧' }
+export const voiceTypeNames: Record<string, string> = { fish: 'Fish Audio', mimo: '小米 MiMo', openai: 'OpenAI 兼容' }
+export const voiceModeNames: Record<string, string> = { fish: '音色库', builtin: '内置音色', design: '设计音色', clone: '克隆音色', openai: '渠道音色' }
+export const tagNames: Record<string, string> = { '': '设定图', sheet: '三视图', expr: '表情表' }
+
+export function voiceLabel(v?: { mode?: string; title?: string; voice?: string }) {
+  if (!v || !v.mode) return ''
+  return v.title || v.voice || voiceModeNames[v.mode] || ''
+}
+
+export function epName(no: number, title?: string) { return title ? `第 ${no} 集 · ${title}` : `第 ${no} 集` }

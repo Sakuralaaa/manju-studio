@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
-import { ArrowRight, ListPlus, Play, Power, RotateCcw, X, Cpu } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { ArrowRight, ListPlus, Play, Power, RotateCcw, X, Cpu, Columns2, Check, Link2 } from 'lucide-react'
 import { api, type ColabState, type Shot, type Video } from '../../api'
 import { useProject, StepHead, Cost } from '../Project'
 import { useStore } from '../../store'
-import { Empty, Spinner, useInterval } from '../../components/ui'
+import { Empty, Modal, Segmented, Spinner, useInterval } from '../../components/ui'
 import { accName, fmtClock, fmtCU, phaseLabels } from '../../labels'
 import { arClass } from './media'
 
@@ -15,19 +15,19 @@ export function useColab(ms = 4000) {
   return { st, reload: load }
 }
 
-export function estimate(st: ColabState | null, n: number, turbo: boolean) {
+export function estimate(st: ColabState | null, n: number, turbo: boolean, post?: { upscale?: boolean; interp?: boolean }) {
   if (!st) return null
   const c = st.cfg, r = st.runner
   const gpuOn = r.phase !== 'off' && r.variant === 'VARIANT_GPU'
   const acc = gpuOn ? r.accelerator : c.accelerator
   const boot = gpuOn && r.booted ? 0 : gpuOn ? Math.max(0, c.boot_min - (Date.now() - r.started_at) / 60000) : c.boot_min
-  const per = turbo ? c.clip_min_turbo : c.clip_min
+  const per = (turbo ? c.clip_min_turbo : c.clip_min) + (post?.upscale ? c.upscale_min || 0 : 0) + (post?.interp ? c.interp_min || 0 : 0)
   const mins = boot + n * per
   return { cu: (mins / 60) * (c.rates[acc] ?? 0), mins, acc }
 }
 
-export function CU({ st, n, turbo }: { st: ColabState | null; n: number; turbo: boolean }) {
-  const e = estimate(st, n, turbo)
+export function CU({ st, n, turbo, post }: { st: ColabState | null; n: number; turbo: boolean; post?: { upscale?: boolean; interp?: boolean } }) {
+  const e = estimate(st, n, turbo, post)
   if (!e) return null
   return <Cost>≈ {fmtCU(e.cu)} CU</Cost>
 }
@@ -69,84 +69,128 @@ export function ComputeStrip({ st, reload }: { st: ColabState | null; reload: ()
 }
 
 export default function Videos() {
-  const { data, run, goStep } = useProject()
+  const { data, run, goStep, patch } = useProject()
   const { st, reload } = useColab()
-  const p = data.project
-  const need = data.shots.filter(s => s.picked_image_id && !s.videos.some(v => v.status === 'done' || v.status === 'queued' || v.status === 'running')).length
+  const p = data.project, e = data.episode
+  const post = { upscale: p.post_upscale, interp: p.post_interp }
+  const shotsNeed = data.shots.filter(s => s.picked_image_id && !s.videos.some(v => v.status === 'done' || v.status === 'queued' || v.status === 'running')).length
+  const need = shotsNeed * p.takes
   const queueAll = async (start: boolean) => {
-    await run(() => api(`/api/projects/${p.id}/videos/queue`, { body: { start } }).then((r: any) => { if (r.start_error) throw new Error('已排队，开机失败：' + r.start_error) }), start ? '已排队并开机' : '已加入队列')
+    await run(() => api(`/api/episodes/${e.id}/videos/queue`, { body: { start } }).then((r: any) => { if (r.start_error) throw new Error('已排队，开机失败：' + r.start_error) }), start ? '已排队并开机' : '已加入队列')
     reload()
   }
   const autoOn = st?.cfg.auto_start
   const off = !st || st.runner.phase === 'off'
   return (
     <section className="stepview">
-      <StepHead title="视频" note={`${p.video_res} · ${p.video_turbo ? 'Turbo 8 步' : '标准 20 步'}`}>
+      <StepHead title="视频" note={`${p.video_res} · ${p.video_turbo ? 'Turbo 8 步' : '标准 20 步'}${p.post_upscale ? ' · 放大' : ''}${p.post_interp ? ' · 补帧' : ''}`}>
+        <Segmented size="sm" block={false} value={String(p.takes)} onChange={v => patch({ takes: Number(v) })} options={[1, 2, 3, 4].map(n => ({ value: String(n), label: `每镜 ${n} 条` }))} />
         <button className="btn btn-secondary" disabled={need === 0} onClick={() => queueAll(false)}><ListPlus size={16} />全部排队<Cost>{need} 段</Cost></button>
-        {off && !autoOn && <button className="btn btn-secondary" disabled={need === 0 || !st?.runner.authorized} onClick={() => queueAll(true)}><Play size={16} />排队并开机<CU st={st} n={need + (st?.runner.queued || 0)} turbo={p.video_turbo} /></button>}
+        {off && !autoOn && <button className="btn btn-secondary" disabled={need === 0 || !st?.runner.authorized} onClick={() => queueAll(true)}><Play size={16} />排队并开机<CU st={st} n={need + (st?.runner.queued || 0)} turbo={p.video_turbo} post={post} /></button>}
         <button className="btn btn-primary" disabled={!data.steps.done[5]} onClick={() => goStep(7)}>下一步：成片<ArrowRight size={16} /></button>
       </StepHead>
       <ComputeStrip st={st} reload={reload} />
       {data.shots.length === 0 && <div className="card card-empty"><Empty art="frame" title="还没有分镜" /></div>}
       <div className={`kgrid kgrid-${p.aspect.replace(':', '-')}`}>
-        {data.shots.map(s => <VideoCard key={s.id} s={s} st={st} />)}
+        {data.shots.map((s, i) => <VideoCard key={s.id} s={s} prev={data.shots[i - 1]} st={st} />)}
       </div>
     </section>
   )
 }
 
-function VideoCard({ s, st }: { s: Shot; st: ColabState | null }) {
+function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | null }) {
   const { data, run } = useProject()
   const p = data.project
+  const [cmp, setCmp] = useState(false)
+  const [view, setView] = useState<number | null>(null)
   const kf = s.images.find(i => i.id === s.picked_image_id)
-  const active = s.videos.find(v => v.status === 'running') || s.videos.find(v => v.status === 'queued')
+  const actives = s.videos.filter(v => v.status === 'running' || v.status === 'queued')
+  const active = actives.find(v => v.status === 'running') || actives[0]
   const done = s.videos.filter(v => v.status === 'done')
-  const shown = done.find(v => v.id === s.picked_video_id) || done[done.length - 1]
+  const chosen = done.find(v => v.id === s.picked_video_id) || done[done.length - 1]
+  const shown = done.find(v => v.id === view) || chosen
   const lastFail = [...s.videos].reverse().find(v => v.status === 'failed')
-  const failNewer = lastFail && (!shown || lastFail.id > shown.id) && !active
+  const failNewer = lastFail && (!chosen || lastFail.id > chosen.id) && !active
+  const waitPrev = s.chain === 'first' && !!prev && !prev.videos.some(v => v.status === 'done')
+  const post = { upscale: p.post_upscale, interp: p.post_interp }
   return (
     <article className="card kcard vcard">
       <div className="kcard-head">
         <span className="code">{s.code}</span>
         <span className="kcard-cam" title={s.camera}>{s.camera || '镜头'}</span>
         <span className="grow" />
+        {s.chain === 'first' && prev && <span className="chain-tag" title="上一镜头最后一帧作首帧"><Link2 size={11} />首尾帧</span>}
         <span className="muted sm-text">{Math.round(s.duration)} 秒</span>
       </div>
       <div className={`frame ${arClass(p.aspect)}`}>
-        {shown && !active ? <video src={shown.url} poster={kf?.url} controls playsInline preload="none" /> :
+        {shown && !active ? <video key={shown.id} src={shown.url} poster={kf?.url} controls playsInline preload="none" /> :
           kf ? <img src={kf.url} alt="" /> : <div className="frame-empty"><span>缺关键帧</span></div>}
-        {active && <VideoState v={active} />}
+        {active && <VideoState v={active} more={actives.length - 1} />}
       </div>
       <div className="vstatus">
-        {active ? (active.status === 'running' ? <span className="accent-text">{active.stage || '生成中'}</span> : <span>排队第 {active.position} 位</span>) :
+        {active ? (active.status === 'running' ? <span className="accent-text">{active.stage || '生成中'}{actives.length > 1 ? ` · 还有 ${actives.length - 1} 条` : ''}</span> : <span>排队第 {active.position} 位{actives.length > 1 ? ` · 共 ${actives.length} 条` : ''}</span>) :
           failNewer ? <span className="danger-text" title={lastFail!.error}>失败：{lastFail!.error}</span> :
-            shown ? <span>{shown.seconds} 秒 · {shown.res}{shown.turbo ? ' · Turbo' : ''}</span> : <span className="muted">未生成</span>}
+            waitPrev && !chosen ? <span className="muted">等上一镜头出视频</span> :
+              shown ? <span>{shown.seconds} 秒 · {shown.res}{shown.turbo ? ' · Turbo' : ''}{shown.post?.upscale ? ' · 放大' : ''}{shown.post?.interp ? ' · 补帧' : ''}</span> : <span className="muted">未生成</span>}
       </div>
       {done.length > 1 && (
-        <div className="vers">
-          {done.map((v, i) => <button key={v.id} className={`ver ${shown?.id === v.id ? 'is-on' : ''}`} onClick={() => run(() => api(`/api/videos/${v.id}/pick`, { method: 'POST' }))}>第 {i + 1} 版</button>)}
+        <div className="takes">
+          {done.map((v, i) => (
+            <button key={v.id} className={`take ${shown?.id === v.id ? 'is-view' : ''} ${chosen?.id === v.id ? 'is-on' : ''}`} onClick={() => setView(v.id)} title={chosen?.id === v.id ? '已选用' : '预览'}>
+              {kf && <img src={kf.url} alt="" />}<b>{i + 1}</b>{chosen?.id === v.id && <i><Check size={10} strokeWidth={3} /></i>}
+            </button>
+          ))}
+          <span className="grow" />
+          {shown && chosen && shown.id !== chosen.id && <button className="btn btn-ghost btn-sm" onClick={() => run(() => api(`/api/videos/${shown.id}/pick`, { method: 'POST' }), '已选用')}><Check size={14} />选用</button>}
+          <button className="icon-btn sm" onClick={() => setCmp(true)} aria-label="对比" title="对比"><Columns2 size={14} /></button>
         </div>
       )}
       <div className="acard-foot">
         {active ? (
-          <button className="btn btn-secondary btn-sm" onClick={() => run(() => api(`/api/videos/${active.id}/cancel`, { method: 'POST' }))}><X size={14} />取消</button>
+          <button className="btn btn-secondary btn-sm" onClick={() => Promise.all(actives.map(v => api(`/api/videos/${v.id}/cancel`, { method: 'POST' }))).then(() => run(async () => {}))}><X size={14} />取消</button>
         ) : (
-          <button className="btn btn-secondary btn-sm" disabled={!kf} onClick={() => run(() => api(`/api/shots/${s.id}/video`, { body: {} }), '已加入队列')}>
-            {shown ? <RotateCcw size={14} /> : <Play size={14} />}{shown ? '重新生成' : '生成'}<CU st={st} n={1} turbo={p.video_turbo} />
+          <button className="btn btn-secondary btn-sm" disabled={!kf || waitPrev} onClick={() => run(() => api(`/api/shots/${s.id}/video`, { body: {} }), '已加入队列')}>
+            {done.length ? <RotateCcw size={14} /> : <Play size={14} />}{done.length ? `再抽 ${p.takes} 条` : p.takes > 1 ? `生成 ${p.takes} 条` : '生成'}<CU st={st} n={p.takes} turbo={p.video_turbo} post={post} />
           </button>
         )}
       </div>
+      {cmp && <Compare s={s} vids={done} chosen={chosen?.id} onClose={() => setCmp(false)} />}
     </article>
   )
 }
 
-function VideoState({ v }: { v: Video }) {
+function Compare({ s, vids, chosen, onClose }: { s: Shot; vids: Video[]; chosen?: number; onClose: () => void }) {
+  const { data, run } = useProject()
+  const [pair, setPair] = useState<number[]>(() => vids.slice(0, 2).map(v => v.id))
+  const refs = [useRef<HTMLVideoElement>(null), useRef<HTMLVideoElement>(null)]
+  const playAll = () => refs.forEach(r => { if (r.current) { r.current.currentTime = 0; r.current.play() } })
+  return (
+    <Modal open wide onClose={onClose} title={`镜头 ${s.code} · 对比`} className="cmp-modal"
+      footer={<><button className="btn btn-secondary" onClick={playAll}><Play size={16} />同时播放</button><span className="grow" /><button className="btn btn-primary" onClick={onClose}>完成</button></>}>
+      <div className="cmp-grid">
+        {[0, 1].map(k => {
+          const v = vids.find(x => x.id === pair[k])
+          return (
+            <div key={k} className="cmp-col">
+              <Segmented size="sm" value={String(pair[k])} onChange={x => setPair(pair.map((y, j) => j === k ? Number(x) : y))} options={vids.map((x, i) => ({ value: String(x.id), label: `第 ${i + 1} 条` }))} />
+              <div className={`frame ${arClass(data.project.aspect)}`}>{v && <video ref={refs[k]} src={v.url} controls playsInline loop />}</div>
+              {v && (chosen === v.id ? <span className="pill-tag is-ok"><Check size={12} />已选用</span> :
+                <button className="btn btn-secondary btn-sm" onClick={() => run(() => api(`/api/videos/${v.id}/pick`, { method: 'POST' }), '已选用')}><Check size={14} />选用这条</button>)}
+            </div>
+          )
+        })}
+      </div>
+    </Modal>
+  )
+}
+
+function VideoState({ v, more }: { v: Video; more: number }) {
   const pct = Math.round(v.progress * 100)
   return (
     <div className="vstate">
       {v.status === 'running' ? <>
         <div className="ring" style={{ ['--p' as any]: pct }}><span>{pct}%</span></div>
-      </> : <><Spinner size={18} /><span>排队中</span></>}
+      </> : <><Spinner size={18} /><span>排队中{more > 0 ? ` · ${more + 1} 条` : ''}</span></>}
     </div>
   )
 }

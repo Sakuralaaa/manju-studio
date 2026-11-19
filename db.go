@@ -169,6 +169,9 @@ func openDB(dir string) error {
 	if _, err = db.Exec(schema); err != nil {
 		return fmt.Errorf("schema: %w", err)
 	}
+	if err = migrate(); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
 	// 重启时：进行中的生成任务标记中断；正在跑的视频退回队列
 	_, _ = db.Exec(`UPDATE tasks SET status='failed', error='服务重启，任务中断', finished_at=? WHERE status='running'`, now())
 	_, _ = db.Exec(`UPDATE videos SET status='queued', progress=0, stage='' WHERE status='running'`)

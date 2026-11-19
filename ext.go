@@ -101,6 +101,7 @@ type videoArgs struct {
 	Aspect      string `json:"aspect"`
 	Turbo       bool   `json:"turbo"`
 	Seed        int64  `json:"seed"`
+	Takes       int    `json:"takes"`
 }
 
 func loadImageBytes(ctx context.Context, a videoArgs) ([]byte, error) {
@@ -136,24 +137,15 @@ func toolVideoSubmit(ctx context.Context, a videoArgs) (any, error) {
 			return nil, errors.New("镜头不存在")
 		}
 		p, _ := getProject(s.ProjectID)
-		for _, x := range listShots(p.ID, false) {
-			if x.ID == s.ID {
-				s.Code = x.Code
-			}
-		}
 		var turbo *bool
 		if a.Turbo {
 			turbo = &a.Turbo
 		}
-		id, err := queueShot(p, s, struct {
-			Seconds int
-			Turbo   *bool
-			Res     string
-		}{a.Seconds, turbo, a.Res})
-		if err != nil {
+		ids, err := queueShot(p, s, queueOpts{Seconds: a.Seconds, Turbo: turbo, Res: a.Res, Takes: a.Takes})
+		if err != nil && len(ids) == 0 {
 			return nil, err
 		}
-		return map[string]any{"id": id, "status": "queued", "estimate": estimateCU(1, a.Turbo)}, nil
+		return map[string]any{"id": ids[0], "ids": ids, "status": "queued", "estimate": estimateCU(len(ids), a.Turbo)}, nil
 	}
 	var file string
 	if a.ImageID > 0 {
@@ -182,7 +174,7 @@ func toolVideoSubmit(ctx context.Context, a videoArgs) (any, error) {
 
 func videoView(v *Video, base string) map[string]any {
 	out := map[string]any{"id": v.ID, "status": v.Status, "progress": v.Progress, "stage": v.Stage, "error": v.Error,
-		"seconds": v.Seconds, "resolution": v.Res, "aspect": v.Aspect, "turbo": v.Turbo, "seed": v.Seed, "shot_id": v.ShotID, "project_id": v.ProjectID,
+		"seconds": v.Seconds, "resolution": v.Res, "aspect": v.Aspect, "turbo": v.Turbo, "seed": v.Seed, "shot_id": v.ShotID, "project_id": v.ProjectID, "episode_id": v.EpisodeID,
 		"created_at": v.CreatedAt, "finished_at": v.FinishedAt}
 	if v.Status == "queued" {
 		out["position"] = v.Position
@@ -202,31 +194,50 @@ func toolVideoStatus(ctx context.Context, id int64, base string) (any, error) {
 	return videoView(v, base), nil
 }
 
+var stepNamesZh = []string{"设定", "剧本", "资产", "分镜", "关键帧", "视频", "成片"}
+
+func missingSteps(st Steps) []string {
+	missing := []string{}
+	for i, d := range st.Done {
+		if !d {
+			missing = append(missing, stepNamesZh[i])
+		}
+	}
+	return missing
+}
+
 func toolProjects(ctx context.Context) (any, error) {
-	rows, err := db.Query(`SELECT ` + projCols + ` FROM projects ORDER BY updated_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	var ps []*Project
-	for rows.Next() {
-		if p, err := scanProject(rows); err == nil {
-			ps = append(ps, p)
-		}
-	}
-	rows.Close()
 	out := []map[string]any{}
-	names := []string{"设定", "剧本", "资产", "分镜", "关键帧", "视频", "成片"}
-	for _, p := range ps {
-		st := projectSteps(p)
-		missing := []string{}
-		for i, d := range st.Done {
-			if !d {
-				missing = append(missing, names[i])
-			}
+	for _, p := range listProjects() {
+		eps := []map[string]any{}
+		for _, e := range listEpisodes(p.ID) {
+			st := episodeSteps(p, e)
+			eps = append(eps, map[string]any{"id": e.ID, "no": e.No, "title": e.Title, "missing_steps": missingSteps(st), "shots": st.Shots, "videos": st.Videos})
 		}
-		out = append(out, map[string]any{"id": p.ID, "title": p.Title, "idea": p.Idea, "aspect": p.Aspect, "shots": st.Shots, "keyframes": st.Keyframes, "videos": st.Videos, "missing_steps": missing, "updated_at": p.UpdatedAt})
+		out = append(out, map[string]any{"id": p.ID, "title": p.Title, "idea": p.Idea, "aspect": p.Aspect, "audio_mode": p.AudioMode, "episodes": eps, "updated_at": p.UpdatedAt})
 	}
 	return out, nil
+}
+
+func shotView(s *Shot, base string) map[string]any {
+	m := map[string]any{"id": s.ID, "episode_id": s.EpisodeID, "code": s.Code, "duration": s.Duration, "camera": s.Camera, "action": s.Action, "dialogue": s.Dialogue,
+		"assets": s.Assets, "chain": s.Chain, "keyframe_prompt": s.KeyframePrompt, "video_prompt": s.VideoPrompt}
+	if s.PickedImageID > 0 {
+		m["keyframe_image_id"] = s.PickedImageID
+		m["keyframe_url"] = fmt.Sprintf("%s/v1/images/%d/file", base, s.PickedImageID)
+	}
+	if v := shotVideoFor(s); v != nil {
+		m["video_id"] = v.ID
+		m["video_url"] = fmt.Sprintf("%s/v1/videos/%d/file", base, v.ID)
+	}
+	takes := []int64{}
+	for _, v := range s.Videos {
+		if v.Status == "done" {
+			takes = append(takes, v.ID)
+		}
+	}
+	m["takes"] = takes
+	return m
 }
 
 func toolShots(ctx context.Context, pid int64, base string) (any, error) {
@@ -234,20 +245,148 @@ func toolShots(ctx context.Context, pid int64, base string) (any, error) {
 		return nil, errors.New("作品不存在")
 	}
 	out := []map[string]any{}
-	for _, s := range listShots(pid, true) {
-		m := map[string]any{"id": s.ID, "code": s.Code, "duration": s.Duration, "camera": s.Camera, "action": s.Action, "dialogue": s.Dialogue,
-			"assets": s.Assets, "keyframe_prompt": s.KeyframePrompt, "video_prompt": s.VideoPrompt}
-		if s.PickedImageID > 0 {
-			m["keyframe_image_id"] = s.PickedImageID
-			m["keyframe_url"] = fmt.Sprintf("%s/v1/images/%d/file", base, s.PickedImageID)
+	for _, e := range listEpisodes(pid) {
+		for _, s := range listShots(e.ID, true) {
+			out = append(out, shotView(s, base))
 		}
-		if v := shotVideoFor(s); v != nil {
-			m["video_id"] = v.ID
-			m["video_url"] = fmt.Sprintf("%s/v1/videos/%d/file", base, v.ID)
-		}
-		out = append(out, m)
 	}
 	return out, nil
+}
+
+func toolEpisodes(ctx context.Context, pid int64) (any, error) {
+	p, err := getProject(pid)
+	if err != nil {
+		return nil, errors.New("作品不存在")
+	}
+	out := []map[string]any{}
+	for _, e := range listEpisodes(pid) {
+		st := episodeSteps(p, e)
+		out = append(out, map[string]any{"id": e.ID, "no": e.No, "title": e.Title, "idea": e.Idea, "summary": e.Summary, "cliffhanger": e.Cliffhanger,
+			"missing_steps": missingSteps(st), "shots": st.Shots, "keyframes": st.Keyframes, "videos": st.Videos, "final": e.FinalFile != "", "autopilot": latestPipe(e.ID)})
+	}
+	return map[string]any{"project": map[string]any{"id": p.ID, "title": p.Title, "world": p.World, "bios": p.Bios, "outline": p.Outline}, "episodes": out}, nil
+}
+
+type epCreateArgs struct {
+	ProjectID int64  `json:"project_id"`
+	Idea      string `json:"idea"`
+	AIIdea    bool   `json:"ai_idea"`
+}
+
+func toolEpisodeCreate(ctx context.Context, a epCreateArgs) (any, error) {
+	p, err := getProject(a.ProjectID)
+	if err != nil {
+		return nil, errors.New("作品不存在")
+	}
+	e, err := insertEpisode(p.ID, a.Idea)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"episode_id": e.ID, "no": e.No}
+	if a.AIIdea && strings.TrimSpace(a.Idea) == "" {
+		if tid, err := episodeIdeaTask(p, e); err == nil {
+			out["idea_task_id"] = tid
+		}
+	}
+	return out, nil
+}
+
+func toolEpisode(ctx context.Context, eid int64, base string) (any, error) {
+	p, e, err := epCtx(eid)
+	if err != nil {
+		return nil, err
+	}
+	shots := []map[string]any{}
+	for _, s := range listShots(e.ID, true) {
+		shots = append(shots, shotView(s, base))
+	}
+	out := map[string]any{"id": e.ID, "project_id": p.ID, "no": e.No, "title": e.Title, "idea": e.Idea, "script": e.Script, "summary": e.Summary,
+		"cliffhanger": e.Cliffhanger, "steps": episodeSteps(p, e), "missing_steps": missingSteps(episodeSteps(p, e)), "shots": shots, "autopilot": latestPipe(e.ID)}
+	if e.FinalFile != "" {
+		out["final_url"] = fmt.Sprintf("%s/v1/episodes/%d/final", base, e.ID)
+	}
+	return out, nil
+}
+
+type pipeArgs struct {
+	EpisodeID int64  `json:"episode_id"`
+	Mode      string `json:"mode"`
+}
+
+func toolAutopilot(ctx context.Context, action string, a pipeArgs) (any, error) {
+	if _, _, err := epCtx(a.EpisodeID); err != nil {
+		return nil, err
+	}
+	switch action {
+	case "start":
+		return startPipe(a.EpisodeID, a.Mode)
+	case "continue":
+		lp := latestPipe(a.EpisodeID)
+		if lp == nil || (lp.Status != "confirm" && lp.Status != "failed" && lp.Status != "canceled") {
+			return nil, errors.New("没有需要继续的一键成集")
+		}
+		if lp.Status == "confirm" {
+			lp.Confirmed = append(lp.Confirmed, lp.Stage)
+		}
+		lp.Status, lp.Message = "running", ""
+		lp.say("继续（接口）")
+		go runPipe(lp.ID)
+		return lp, nil
+	case "cancel":
+		cancelPipe(a.EpisodeID)
+		return map[string]any{"ok": true}, nil
+	}
+	lp := latestPipe(a.EpisodeID)
+	if lp == nil {
+		return map[string]any{"status": "none"}, nil
+	}
+	return lp, nil
+}
+
+func toolLines(ctx context.Context, eid int64, force bool) (any, error) {
+	p, e, err := epCtx(eid)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := linesTask(p, e, force)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"task_id": tid}, nil
+}
+
+type ttsArgs struct {
+	Text    string     `json:"text"`
+	Emotion string     `json:"emotion"`
+	AssetID int64      `json:"asset_id"`
+	Voice   *VoiceSpec `json:"voice"`
+}
+
+func toolTTS(ctx context.Context, a ttsArgs, base string) (any, error) {
+	var v VoiceSpec
+	switch {
+	case a.Voice != nil:
+		v = *a.Voice
+	case a.AssetID > 0:
+		as, err := getAsset(a.AssetID)
+		if err != nil {
+			return nil, errors.New("角色不存在")
+		}
+		v = as.Voice
+	default:
+		return nil, errors.New("需要 asset_id 或 voice")
+	}
+	if v.empty() {
+		return nil, errors.New("这个角色还没有音色")
+	}
+	c, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	name, dur, err := speakTo(c, v, a.Text, a.Emotion, "api")
+	ledgerAdd(0, 0, "tts", 1, 0, 0, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"url": base + "/v1/audio/" + name, "duration": dur}, nil
 }
 
 type imageArgs struct {
@@ -378,6 +517,75 @@ func extImageGenerate(w http.ResponseWriter, r *http.Request) {
 	extReply(w, v, err)
 }
 
+func extEpisodes(w http.ResponseWriter, r *http.Request) {
+	v, err := toolEpisodes(r.Context(), pathID(r))
+	extReply(w, v, err)
+}
+func extEpisodeCreate(w http.ResponseWriter, r *http.Request) {
+	var a epCreateArgs
+	_ = readJSON(r, &a)
+	a.ProjectID = pathID(r)
+	v, err := toolEpisodeCreate(r.Context(), a)
+	extReply(w, v, err)
+}
+func extEpisodeGet(w http.ResponseWriter, r *http.Request) {
+	v, err := toolEpisode(r.Context(), pathID(r), baseURL(r))
+	extReply(w, v, err)
+}
+func extAutopilotStart(w http.ResponseWriter, r *http.Request) {
+	var a pipeArgs
+	_ = readJSON(r, &a)
+	a.EpisodeID = pathID(r)
+	v, err := toolAutopilot(r.Context(), "start", a)
+	extReply(w, v, err)
+}
+func extAutopilotGet(w http.ResponseWriter, r *http.Request) {
+	v, err := toolAutopilot(r.Context(), "status", pipeArgs{EpisodeID: pathID(r)})
+	extReply(w, v, err)
+}
+func extAutopilotContinue(w http.ResponseWriter, r *http.Request) {
+	v, err := toolAutopilot(r.Context(), "continue", pipeArgs{EpisodeID: pathID(r)})
+	extReply(w, v, err)
+}
+func extAutopilotCancel(w http.ResponseWriter, r *http.Request) {
+	v, err := toolAutopilot(r.Context(), "cancel", pipeArgs{EpisodeID: pathID(r)})
+	extReply(w, v, err)
+}
+func extLinesGenerate(w http.ResponseWriter, r *http.Request) {
+	var a struct {
+		Force bool `json:"force"`
+	}
+	_ = readJSON(r, &a)
+	v, err := toolLines(r.Context(), pathID(r), a.Force)
+	extReply(w, v, err)
+}
+func extTTS(w http.ResponseWriter, r *http.Request) {
+	var a ttsArgs
+	if err := readJSON(r, &a); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	v, err := toolTTS(r.Context(), a, baseURL(r))
+	extReply(w, v, err)
+}
+func extEpisodeFinal(w http.ResponseWriter, r *http.Request) {
+	_, e, err := epCtx(pathID(r))
+	if err != nil || e.FinalFile == "" {
+		httpErr(w, 404, "这一集还没有成片")
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeFile(w, r, filepath.Join(dataDir, "videos", e.FinalFile))
+}
+func extAudioFile(w http.ResponseWriter, r *http.Request) {
+	name := filepath.Base(r.PathValue("name"))
+	if name == "." || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(dataDir, "audio", name))
+}
+
 // ---------- MCP ----------
 
 type mcpTool struct {
@@ -412,12 +620,27 @@ var mcpTools = []mcpTool{
 	}, "code")},
 	{"video_submit", "提交一个图生视频任务（MiniMax H3，首帧 + 描述 → 5–10 秒带声音的视频）。给 shot_id 时直接用该镜头的关键帧和描述。", obj(map[string]any{
 		"prompt": str("视频描述：动作、运镜、声音"), "image_id": num("已有图片编号"), "image_url": str("首帧图片地址"), "image_base64": str("首帧图片 base64"),
-		"shot_id": num("作品里的镜头编号"), "seconds": num("时长 5–10 秒，默认 5"), "resolution": map[string]any{"type": "string", "enum": []string{"768p", "480p"}},
+		"shot_id": num("作品里的镜头编号"), "takes": num("抽卡次数 1–4，只对 shot_id 有效"), "seconds": num("时长 5–10 秒，默认 5"), "resolution": map[string]any{"type": "string", "enum": []string{"768p", "480p"}},
 		"aspect": str("画幅，如 9:16、16:9、1:1"), "turbo": boolp("使用 Turbo 8 步"), "seed": num("随机种子"),
 	})},
 	{"video_status", "查询视频任务状态；完成后返回下载地址（同一密钥可下载）。", obj(map[string]any{"id": num("视频任务编号")}, "id")},
-	{"list_projects", "列出全部作品及各自还缺哪些步骤。", obj(map[string]any{})},
-	{"list_shots", "列出某个作品的分镜：镜头语言、画面、台词、资产编号、关键帧与视频。", obj(map[string]any{"project_id": num("作品编号")}, "project_id")},
+	{"list_projects", "列出全部作品（剧集）及每一集还缺哪些步骤。", obj(map[string]any{})},
+	{"list_shots", "列出某个作品全部集的分镜：镜头语言、画面、台词、资产编号、衔接方式、关键帧、选定视频与抽卡候选。", obj(map[string]any{"project_id": num("作品编号")}, "project_id")},
+	{"list_episodes", "列出某个作品的设定集（世界观、人物小传、总纲）和各集：梗概、摘要、卡点、缺失步骤、一键成集进度。", obj(map[string]any{"project_id": num("作品编号")}, "project_id")},
+	{"create_episode", "给作品新建下一集。ai_idea=true 时根据设定集、前情摘要和上一集卡点自动拟定本集梗概。", obj(map[string]any{
+		"project_id": num("作品编号"), "idea": str("本集梗概，可留空"), "ai_idea": boolp("自动拟定梗概"),
+	}, "project_id")},
+	{"get_episode", "查看一集的剧本、摘要、各步骤状态和分镜。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
+	{"autopilot_start", "一键成集：梗概→剧本→资产→分镜→关键帧→配音→视频（只排队，按算力设置决定是否开机）→成片→摘要与封面。mode=auto 全自动；mode=ask 在剧本、资产、分镜之后暂停等确认。", obj(map[string]any{
+		"episode_id": num("集编号"), "mode": map[string]any{"type": "string", "enum": []string{"auto", "ask"}},
+	}, "episode_id")},
+	{"autopilot_status", "查询一键成集进度：状态（running / confirm / waiting / done / failed / canceled）、当前阶段、日志。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
+	{"autopilot_continue", "确认当前暂停点（或从失败处重试），继续一键成集。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
+	{"autopilot_cancel", "停止一键成集。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
+	{"generate_dub", "为一集的全部台词生成配音（按各角色音色与旁白音色）；force=true 时全部重做。", obj(map[string]any{"episode_id": num("集编号"), "force": boolp("全部重做")}, "episode_id")},
+	{"tts", "用角色音色（asset_id）或指定音色合成一句话，返回音频地址。", obj(map[string]any{
+		"text": str("要念的文字"), "emotion": str("语气，如：压低声音、愤怒"), "asset_id": num("角色资产编号"), "voice": map[string]any{"type": "object", "description": "音色：channel_id、mode（fish / builtin / design / clone / openai）、voice、sample、speed、pitch"},
+	}, "text")},
 	{"image_generate", "用生图渠道生成图片，返回图片编号和下载地址。", obj(map[string]any{
 		"prompt": str("提示词"), "channel_id": num("渠道编号，不填用第一个生图渠道"), "model": str("模型名"), "aspect": str("比例，如 9:16"), "n": num("张数 1–4"),
 	}, "prompt")},
@@ -498,7 +721,7 @@ func mcpHandle(ctx context.Context, q rpcReq, base string) any {
 			"protocolVersion": pv,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "manju-studio", "title": "漫剧工坊", "version": version},
-			"instructions":    "漫剧工坊：管理 Colab 运行时、在运行时上执行 Python、提交 MiniMax H3 图生视频任务、查询作品分镜、调用生图渠道。视频任务是异步的：video_submit 之后用 video_status 轮询。",
+			"instructions":    "漫剧工坊：作品是连载剧集（设定集 + 多集，资产库跨集共享）。可以新建一集并一键成集（autopilot_start，异步，用 autopilot_status 轮询，mode=ask 时用 autopilot_continue 确认）、生成配音、合成语音；也能直接管理 Colab 运行时、执行 Python、提交 MiniMax H3 图生视频（video_submit 后用 video_status 轮询）、调用生图渠道。",
 		})
 	case "ping":
 		return ok(map[string]any{})
@@ -579,6 +802,36 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		_ = json.Unmarshal(args, &a)
 		id, _ := strconv.ParseInt(a.ProjectID.String(), 10, 64)
 		return toolShots(ctx, id, base)
+	case "list_episodes":
+		var a struct {
+			ProjectID json.Number `json:"project_id"`
+		}
+		_ = json.Unmarshal(args, &a)
+		id, _ := strconv.ParseInt(a.ProjectID.String(), 10, 64)
+		return toolEpisodes(ctx, id)
+	case "create_episode":
+		var a epCreateArgs
+		_ = json.Unmarshal(args, &a)
+		return toolEpisodeCreate(ctx, a)
+	case "get_episode", "autopilot_status", "autopilot_continue", "autopilot_cancel", "autopilot_start", "generate_dub":
+		var a struct {
+			EpisodeID json.Number `json:"episode_id"`
+			Mode      string      `json:"mode"`
+			Force     bool        `json:"force"`
+		}
+		_ = json.Unmarshal(args, &a)
+		id, _ := strconv.ParseInt(a.EpisodeID.String(), 10, 64)
+		switch name {
+		case "get_episode":
+			return toolEpisode(ctx, id, base)
+		case "generate_dub":
+			return toolLines(ctx, id, a.Force)
+		}
+		return toolAutopilot(ctx, strings.TrimPrefix(name, "autopilot_"), pipeArgs{EpisodeID: id, Mode: a.Mode})
+	case "tts":
+		var a ttsArgs
+		_ = json.Unmarshal(args, &a)
+		return toolTTS(ctx, a, base)
 	case "image_generate":
 		var a imageArgs
 		_ = json.Unmarshal(args, &a)

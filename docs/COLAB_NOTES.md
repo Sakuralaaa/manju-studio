@@ -84,3 +84,16 @@
 - `runner.Stop` → DeleteRuntime → `GET v1beta/runtimes` 返回 0 台。
 
 没有验证的：真 GPU 上的 ComfyUI 安装、权重下载、MiniMax H3 推理、SageAttention、G4 实际耗时与 CU。
+
+## 7. 第二版新增（2026-11-19 15:00 UTC，CPU 运行时，约 30 秒，用完删除，`GET v1beta/runtimes` 返回 0 台）
+
+同一个 `live_test.go` 增加了两项，在真实 CPU 运行时 + 模拟 ComfyUI 上通过：
+- **首尾帧 + 画质后期注入**：`renderVideo` 上传首帧和尾帧，发到 ComfyUI 的工作流里 `MiniMaxH3ImageToVideo.last_frame` 接到新增的 `LoadImage`（文件确实在 `ComfyUI/input/`），
+  `CreateVideo.images` 依次经过 `UpscaleModelLoader → ImageUpscaleWithModel → ImageScale → RIFE VFI`，`fps` 变成 48。
+- **云端硬盘缓存的状态回传**：应用把访问令牌写进 `/content/mj_drive_token`，从 `/content/mj_drive_status.json` 读回文件编号并记下。
+
+没有验证的（需要 GPU 或额外授权）：
+- MiniMax H3 的 `last_frame` 输入在真实节点上的效果（节点定义里有这个可选输入，未实测）；
+- `RealESRGAN_x2plus` 放大、`RIFE VFI` 补帧在 G4 上的耗时与显存（估算默认每段 1.5 / 1 分钟，可改）；ComfyUI-Frame-Interpolation 的安装（`install.py`，cupy 后端）；
+- 云端硬盘的真实上传 / 下载（现有授权只有 Colab 权限，没有替用户重新授权）。方法：drive.file 范围；`POST drive/v3/files` 建文件夹；
+  `POST upload/drive/v3/files?uploadType=resumable` 拿到会话地址后按 64 MB 分块 `PUT`（`Content-Range`，308 继续）；下载 `GET drive/v3/files/{id}?alt=media` 带 Bearer 令牌，aria2 支持分段。

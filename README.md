@@ -2,9 +2,11 @@
 
 以 Colab 为算力中心的 AI 漫剧（竖屏短篇动态漫画剧）制作工坊。自托管、单个二进制、单管理员。
 
-一条龙流程：**设定 → 剧本 → 资产 → 分镜 → 关键帧 → 视频 → 成片**。
-剧本、资产提取和分镜用文本渠道（OpenAI 兼容对话接口）；角色/场景/道具设定图和关键帧用生图渠道；
-镜头视频在你自己的 Colab 运行时上用 ComfyUI + MiniMax H3（官方 INT8 预量化权重）做图生视频；最后用 ffmpeg 拼接成片。
+作品是**连载剧集**：设定集（世界观 / 人物小传 / 分集总纲）+ 多集，资产库跨集共享；每一集走
+**设定 → 剧本 → 资产 → 分镜 → 关键帧 → 视频 → 成片** 七步，也可以**一键成集**。
+剧本、资产提取、分镜、摘要用文本渠道（OpenAI 兼容对话接口）；角色设定图 / 定妆图 / 关键帧 / 封面用生图渠道；
+镜头视频在你自己的 Colab 运行时上用 ComfyUI + MiniMax H3（官方 INT8 预量化权重）做图生视频；配音用语音渠道
+（Fish Audio、小米 MiMo、OpenAI 兼容）；最后用 ffmpeg 混音、拼接成片，也能导出剪映草稿。
 
 ## 部署
 
@@ -20,7 +22,7 @@ services:
     volumes: ["./data:/data"]
 ```
 
-数据目录 `/data`：`manju.db`（SQLite）、`images/`、`videos/`、`tmp/`。镜像自带 ffmpeg 和中文字体（烧录字幕用）。
+数据目录 `/data`：`manju.db`（SQLite）、`images/`、`videos/`、`audio/`（配音、音色样本、配乐、音效）、`tmp/`。镜像自带 ffmpeg 和中文字体（烧录字幕用）。
 
 | 环境变量 | 说明 | 默认 |
 |---|---|---|
@@ -34,6 +36,18 @@ services:
   渠道不支持的参数（比例、质量等）自动写进提示词。参考图上限按档案截断（实测：比例型 5 张、尺寸型 20 张、提示词比例型 3 张），
   返回链接的图片立即下载落盘。
 - **文本渠道**：OpenAI 兼容 `/v1/chat/completions`，测试连接后勾选模型，作品里可以选渠道和模型。
+- **语音渠道**（配音）：
+  - **Fish Audio**（主要）：`POST {base}/v1/tts`，请求头 `model`（`s2.1-pro` 默认，可选 `s2-pro` `s2.1-pro-free` `s3-pro` `drama-3` `s1`），
+    角色音色 = 模型的 `reference_id`。应用内可浏览 / 搜索公开中文音色并试听（`GET /model?language=zh`），
+    也能用上传或浏览器录音的 10–60 秒样本新建自己的音色（`POST /model` multipart：`visibility=private` `type=tts` `train_mode=fast`
+    `voices` 多个文件 + 对应 `texts`），列出 / 改名 / 删除自己的音色（`self=true`、`PATCH` / `DELETE /model/{id}`）。
+    语速走 `prosody.speed`；台词语气（如「压低声音」「愤怒」）映射成 S2 的 `[whispering]` `[angry]` 等标记（S1 用圆括号）。
+  - **小米 MiMo**：`POST {base}/chat/completions`，请求头 `api-key`，要念的文字放 assistant 消息，语气指令放 user 消息，
+    音频在 `choices[0].message.audio.data`（base64 wav）。内置音色用 `mimo-v2.5-tts`；**设计音色**用 `mimo-v2.5-tts-voicedesign`
+    按文字描述出 2–3 个候选，留下的那段存成本地样本，之后用 `mimo-v2.5-tts-voiceclone`（`audio.voice = data:audio/wav;base64,…`）合成；
+    克隆音色同样走 voiceclone。
+  - **OpenAI 兼容**：`POST {base}/audio/speech`（`model` `voice` `speed` `instructions`）。
+  - 没有原生语速的渠道在本地用 ffmpeg 变速；音调（半音）统一本地处理。
 - 密钥只存在数据库里，界面只显示后四位。
 
 ## 算力（Colab）
@@ -51,9 +65,29 @@ services:
 - 每个花钱的按钮都显示估算：生图显示张数，视频显示 CU（G4 ≈ 8.9 CU/小时等费率为第三方估算，可改）；
 - 服务启动时会清理上次遗留的本应用运行时（名字以 `manju-` 开头）。
 
+- 「算力 → 账本」：每集实际用掉的视频 GPU 分钟 / CU（开机与空闲按会话里各集的视频数分摊）、估算 CU、生图张数、配音条数、对话次数；
+  每次会话的开机时长和出视频时长。
+
 视频环境（首次开机自动执行，可重复）：克隆 ComfyUI → 安装依赖 → 可选 SageAttention（失败自动回退）→
 aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_int8_convrot` 约 21 GB、Qwen3-VL 文本编码器 NVFP4、视频/音频 VAE、Turbo 8 步 LoRA）→
 启动 ComfyUI。模型文件列表、运行环境参数、标准 / Turbo 两套工作流（ComfyUI API 格式）都可以在「算力 → 视频模型」里改。
+
+模型权重（「算力 → 调度 → 模型权重」，默认都关闭）：
+
+- **下载镜像**：填一个 Hugging Face 镜像根地址（例如 `https://hf-mirror.com`），开机时把 `https://huggingface.co` 前缀替换掉。
+- **云端硬盘缓存**：开启后授权多申请 `https://www.googleapis.com/auth/drive.file`（只能访问本应用自己建的文件），
+  界面会提示需要重新授权一次（已有的授权只有 Colab 权限，应用不会自己去改）。之后：
+  1. 开机时应用在云端硬盘里建「漫剧工坊权重缓存」文件夹，把访问令牌写到运行时的 `/content/mj_drive_token`（每 10 分钟刷新）；
+  2. 第一次会话照常从 Hugging Face 下载，下载完在运行时里起一个后台线程，用可续传上传（64 MB 分块，每块前重读令牌）把权重传进文件夹，
+     进度写在 `/content/mj_drive_status.json`，应用定时读回并记下每个文件的编号与大小；
+  3. 之后的会话，大小一致的文件直接从 `https://www.googleapis.com/drive/v3/files/{id}?alt=media` 用 aria2 16 线程拉取，缺的再走 Hugging Face。
+
+画质后期（每个作品在「设定 → 声音与画质」里选，**未在 GPU 上实测**）：
+
+- 云端放大：在 CreateVideo 之前插入 `UpscaleModelLoader`（默认 `RealESRGAN_x2plus.pth`）→ `ImageUpscaleWithModel` → `ImageScale(lanczos)` 到 1080×1920；
+- 云端补帧：插入 Fannovel16/ComfyUI-Frame-Interpolation 的 `RIFE VFI`（`rife47.pth`，2 倍到 48 帧/秒），开机时按需安装节点；
+- 模型、节点仓库、倍数都在「算力 → 视频模型 → 画质后期」里改；
+- 交付 1080p 时，成片在本地用 ffmpeg lanczos 统一缩放到 1080×1920（廉价兜底，云端没放大时也能交付 1080p）。
 
 工作流占位符：`{{PROMPT}}` `{{IMAGE}}` `{{WIDTH}}` `{{HEIGHT}}` `{{LENGTH}}`（24fps，17k+5 帧）`{{SEED}}` `{{PREFIX}}`。
 默认 768p（竖屏 768×1344），5–10 秒，H3 同时生成配音与音效。
@@ -61,17 +95,36 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 运行时通信细节见 [docs/COLAB_NOTES.md](docs/COLAB_NOTES.md)；要点：运行时连接地址是 Jupyter Server，请求头 `X-Colab-Runtime-Proxy-Token`，
 代码通过内核 WebSocket 执行，文件经 contents 接口上传、`/files/` 下载。
 
-## 制作流程
+## 剧集
+
+- **作品 = 设定集 + 多集**。设定集里写世界观、人物小传、分集总纲，可以让 AI 根据创意生成或完善；资产库（角色 / 场景 / 道具、定妆图、音色）全剧共享。
+- 写第 N 集剧本时，模型拿到：设定集 + 前几集的摘要 + 上一集的卡点（开场必须接住）。新建一集时可以让 AI 先拟定本集梗概。
+- 每集合成后自动写摘要（80–150 字）和卡点，供后面的集使用；也可以手动改。
+- 升级时，原来的单集作品自动变成该剧的第 1 集（剧本、分镜、视频、成片都挂到第 1 集）。
+
+## 制作流程（每一集）
 
 | 步骤 | 做什么 |
 |---|---|
-| ① 设定 | 剧名、创意、风格、画幅（默认 9:16）、单集时长、目标镜头数、文本/生图渠道、视频分辨率与 Turbo |
-| ② 剧本 | AI 按「钩子开场 → 节拍 → 反转 → 卡点」写单集剧本，可改写、可粘贴自己的剧本，自动保存 |
-| ③ 资产 | 从剧本提取角色 C01…、场景 S01…、道具 P01…；逐个生成设定图，多张候选选一张，可重生成或上传 |
-| ④ 分镜 | AI 拆成 5–10 秒的镜头：镜头语言、画面、台词、出场资产编号、关键帧提示词、视频描述；可编辑、排序、增删 |
-| ⑤ 关键帧 | 用出场资产的选定图作参考图生成关键帧（角色 → 场景 → 道具，按渠道上限截断，超出的用文字描述补上） |
-| ⑥ 视频 | 镜头排队到 Colab 图生视频；每个镜头显示排队位置 / 进度 / 结果，可重生成、取消、在多个版本间选择 |
-| ⑦ 成片 | 按顺序预览；ffmpeg 统一分辨率与帧率后拼接，可选烧录台词字幕；下载成片、字幕、全部素材 zip |
+| ① 设定 | 本集标题、梗概（可 AI 拟定）；剧名、创意、风格、画幅、单集时长、目标镜头数、视频规格、每镜抽卡次数；人声方式（视频原生 / 配音覆盖）、旁白音色、交付画质、云端放大 / 补帧；文本 / 生图渠道 |
+| ② 剧本 | AI 按「接住上集卡点 → 钩子 → 节拍 → 反转 → 卡点」写本集剧本，可改写、可粘贴，自动保存 |
+| ③ 资产 | 从本集剧本补充提取资产（已有的不重复）；角色可做设定图、**定妆三视图**、**表情表**；每个角色设音色；「一键设计音色」给所有没音色的角色和旁白设计 |
+| ④ 分镜 | AI 拆镜头；每个镜头可选与上一镜头的衔接：不衔接 / 最后一帧作参考 / 最后一帧作首帧（首尾帧生成） |
+| ⑤ 关键帧 | 参考图按相关度挑选：本镜头最重要的角色（有台词、全剧出场多）用三视图，衔接时上一镜头最后一帧紧随其后，然后其余角色、场景、道具；超出渠道上限的改用文字描述 |
+| ⑥ 视频 | 每个镜头抽 1–4 条（CU 估算随之变化），候选条带里预览、选用，可两条并排同步播放对比；首尾帧镜头等上一镜头出视频后再排队 |
+| ⑦ 成片 | **合成**：字幕、封面（生图模型渲染标题）、本集摘要；**配音**：逐句台词，可填语气、试听、单句重做；**配乐音效**：上传曲库，选曲、音量、淡入淡出、对白时自动压低，每个镜头可加音效；**导出**：成片、字幕、素材包、剪映草稿 |
+
+配音覆盖模式下，视频描述只让 H3 生成口型和环境声（不要人声），H3 原声按音量压低，逐句配音按镜头排开（超长时先压缩句间隔，再最多加速 1.5 倍），旁白作画外音。
+
+成片混音：逐镜头统一画面（可选 1080p lanczos、烧录字幕）并混入原声与音效 → 拼接 → 叠加配音轨 → 配乐循环铺满、淡入淡出，
+`sidechaincompress` 以对白为触发自动压低配乐 → `alimiter`。
+
+**剪映草稿**：`draft_content.json` + `draft_meta_info.json` + `materials/`，打成 zip。轨道：视频、配音、音效、配乐、字幕（文字轨）。
+结构对照开源项目 pyJianYingDraft（剪映 5.9 草稿格式）；填写本机草稿目录时素材写绝对路径，留空时用剪映的草稿占位前缀。解压到剪映草稿目录即可打开（未在剪映客户端实测）。
+
+**一键成集**：梗概 → 剧本 → 资产（提取、设定图、音色）→ 分镜 → 关键帧 → 配音 → 视频排队 → 成片 → 摘要与封面。
+「全自动」一路做完；「关键处问我」在剧本、资产、分镜之后暂停等确认。每一步先检查是否已完成，所以随时停下后可以继续；服务重启后自动接着跑。
+视频只排队，是否开机由「算力 → 调度」里的「有排队视频时自动开机」决定（默认关闭）。
 
 ## 对外接口（给其他智能体）
 
@@ -92,10 +145,19 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `colab_start` | 开机：`purpose=video`（需 GPU，自动准备视频环境）或 `manual`（仅开机，可选 CPU） |
 | `colab_stop` | 关机 |
 | `colab_run_python` | 在运行时内核里执行 Python，返回 stdout / stderr / 结果 / 错误 |
-| `video_submit` | 提交图生视频：`image_id` / `image_url` / `image_base64` / `shot_id` + `prompt`、`seconds`、`turbo`、`resolution`、`aspect`、`seed` |
+| `video_submit` | 提交图生视频：`image_id` / `image_url` / `image_base64` / `shot_id`（可带 `takes` 抽卡次数）+ `prompt`、`seconds`、`turbo`、`resolution`、`aspect`、`seed` |
 | `video_status` | 查询视频任务；完成后带下载地址 |
-| `list_projects` | 作品与缺失步骤 |
-| `list_shots` | 作品分镜、关键帧与视频地址 |
+| `list_projects` | 作品（剧集）与每集缺失步骤 |
+| `list_shots` | 作品全部集的分镜、关键帧、选定视频与抽卡候选 |
+| `list_episodes` | 设定集与各集梗概、摘要、卡点、进度 |
+| `create_episode` | 新建下一集，`ai_idea=true` 自动拟定梗概 |
+| `get_episode` | 一集的剧本、摘要、步骤状态、分镜 |
+| `autopilot_start` | 一键成集，`mode=auto` / `ask` |
+| `autopilot_status` | 一键成集进度与日志 |
+| `autopilot_continue` | 确认暂停点或从失败处重试 |
+| `autopilot_cancel` | 停止一键成集 |
+| `generate_dub` | 生成一集的全部配音 |
+| `tts` | 用角色音色（`asset_id`）或指定音色合成一句话 |
 | `image_generate` | 用生图渠道出图 |
 
 ### REST
@@ -112,6 +174,17 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | GET | `/v1/videos/{id}/file` | 下载视频 |
 | GET | `/v1/projects` | 作品列表 |
 | GET | `/v1/projects/{id}/shots` | 分镜 |
+| GET | `/v1/projects/{id}/episodes` | 设定集与各集 |
+| POST | `/v1/projects/{id}/episodes` | `{idea, ai_idea}` 新建一集 |
+| GET | `/v1/episodes/{id}` | 一集详情 |
+| GET | `/v1/episodes/{id}/final` | 下载成片 |
+| POST | `/v1/episodes/{id}/autopilot` | `{mode}` 一键成集 |
+| GET | `/v1/episodes/{id}/autopilot` | 进度 |
+| POST | `/v1/episodes/{id}/autopilot/continue` | 确认 / 重试 |
+| POST | `/v1/episodes/{id}/autopilot/cancel` | 停止 |
+| POST | `/v1/episodes/{id}/lines` | `{force}` 生成配音 |
+| POST | `/v1/tts` | `{text, emotion, asset_id \| voice}` → `{url, duration}` |
+| GET | `/v1/audio/{name}` | 下载音频 |
 | POST | `/v1/images` | `{prompt, channel_id, model, aspect, n}` |
 | GET | `/v1/images/{id}/file` | 下载图片 |
 
@@ -130,6 +203,7 @@ go build -o manju-studio . && ADMIN_PASSWORD=dev DATA_DIR=./data ./manju-studio
 
 Go 1.26 + SQLite（modernc，无 CGO）+ React / Vite / TypeScript（手写样式），前端嵌入单个二进制。
 推送 `v*` 标签时 GitHub Actions 构建 amd64 + arm64 镜像到 `ghcr.io/sakuralaaa/manju-studio`（`latest` / `x.y.z` / `x.y` / `sha`）。
+推送到 `ci-check` 分支（或手动触发）时另一个工作流只构建 amd64 镜像做检查，不推送。
 
 ## 许可
 

@@ -80,7 +80,20 @@ var workflowDefs = []wfDef{
 	{Key: "turbo", Name: "Turbo 工作流", Default: wfTurbo, Kind: "workflow"},
 	{Key: "files", Name: "模型文件", Default: defaultFiles, Kind: "files"},
 	{Key: "boot", Name: "运行环境", Default: `{"comfy_repo": "https://github.com/Comfy-Org/ComfyUI", "sage": true, "sage_pkg": "sageattention", "threads": 16, "extra_args": []}`, Kind: "boot"},
+	{Key: "post", Name: "画质后期", Default: defaultPost, Kind: "boot"},
 }
+
+// 画质后期（在 Colab 的 ComfyUI 里做，未在 GPU 上实测）：
+// 放大：核心节点 UpscaleModelLoader → ImageUpscaleWithModel → ImageScale(lanczos) 到交付尺寸；
+// 补帧：Fannovel16/ComfyUI-Frame-Interpolation 的「RIFE VFI」节点，2 倍补到 48 帧/秒。
+const defaultPost = `{
+  "upscale_model": "RealESRGAN_x2plus.pth",
+  "upscale_url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+  "interp_repo": "https://github.com/Fannovel16/ComfyUI-Frame-Interpolation",
+  "interp_node": "RIFE VFI",
+  "rife_ckpt": "rife47.pth",
+  "interp_multiplier": 2
+}`
 
 func initWorkflows() {}
 
@@ -152,6 +165,13 @@ func validateWorkflow(kind, text string) error {
 				return fmt.Errorf("节点 %s 缺少 class_type（需要 API 格式的工作流）", id)
 			}
 		}
+		hasCreate := false
+		for _, n := range m {
+			if n.ClassType == "CreateVideo" {
+				hasCreate = true
+			}
+		}
+		_ = hasCreate
 		for _, ph := range []string{"{{IMAGE}}", "{{PROMPT}}"} {
 			if !strings.Contains(text, ph) {
 				return fmt.Errorf("工作流里没有 %s 占位符", ph)

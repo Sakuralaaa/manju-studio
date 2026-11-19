@@ -36,6 +36,8 @@ type Image struct {
 	ChannelID int64  `json:"channel_id"`
 	Model     string `json:"model"`
 	CreatedAt int64  `json:"created_at"`
+	Tag       string `json:"tag"`
+	EpisodeID int64  `json:"episode_id"`
 }
 
 func sniffFormat(data []byte) (ext, mime string) {
@@ -52,11 +54,11 @@ func sniffFormat(data []byte) (ext, mime string) {
 	return "", ""
 }
 
-const imgCols = `id,project_id,owner_type,owner_id,file,mime,width,height,bytes,source,prompt,channel_id,model,created_at`
+const imgCols = `id,project_id,owner_type,owner_id,file,mime,width,height,bytes,source,prompt,channel_id,model,created_at,tag,episode_id`
 
 func scanImage(sc interface{ Scan(...any) error }) (*Image, error) {
 	var im Image
-	if err := sc.Scan(&im.ID, &im.ProjectID, &im.OwnerType, &im.OwnerID, &im.File, &im.Mime, &im.Width, &im.Height, &im.Bytes, &im.Source, &im.Prompt, &im.ChannelID, &im.Model, &im.CreatedAt); err != nil {
+	if err := sc.Scan(&im.ID, &im.ProjectID, &im.OwnerType, &im.OwnerID, &im.File, &im.Mime, &im.Width, &im.Height, &im.Bytes, &im.Source, &im.Prompt, &im.ChannelID, &im.Model, &im.CreatedAt, &im.Tag, &im.EpisodeID); err != nil {
 		return nil, err
 	}
 	im.URL = "/files/images/" + im.File
@@ -84,6 +86,10 @@ func listImages(where string, args ...any) []*Image {
 
 // storeImage 落盘并入库
 func storeImage(projectID int64, ownerType string, ownerID int64, data []byte, source, prompt string, chID int64, model string) (*Image, error) {
+	return storeImageX(projectID, 0, ownerType, ownerID, "", data, source, prompt, chID, model)
+}
+
+func storeImageX(projectID, episodeID int64, ownerType string, ownerID int64, tag string, data []byte, source, prompt string, chID int64, model string) (*Image, error) {
 	ext, mime := sniffFormat(data)
 	if ext == "" {
 		return nil, errors.New("无法识别的图片格式")
@@ -96,8 +102,8 @@ func storeImage(projectID int64, ownerType string, ownerID int64, data []byte, s
 	if err := os.WriteFile(filepath.Join(dataDir, "images", name), data, 0o644); err != nil {
 		return nil, err
 	}
-	res, err := db.Exec(`INSERT INTO images(project_id,owner_type,owner_id,file,mime,width,height,bytes,source,prompt,channel_id,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		projectID, ownerType, ownerID, name, mime, cfg.Width, cfg.Height, len(data), source, prompt, chID, model, now())
+	res, err := db.Exec(`INSERT INTO images(project_id,owner_type,owner_id,file,mime,width,height,bytes,source,prompt,channel_id,model,created_at,tag,episode_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		projectID, ownerType, ownerID, name, mime, cfg.Width, cfg.Height, len(data), source, prompt, chID, model, now(), tag, episodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -280,9 +286,14 @@ func handleImagePick(w http.ResponseWriter, r *http.Request) {
 	}
 	switch im.OwnerType {
 	case "asset":
-		_, _ = db.Exec(`UPDATE assets SET picked_image_id=? WHERE id=?`, im.ID, im.OwnerID)
+		col := map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}[im.Tag]
+		if col != "" {
+			_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=?`, im.ID, im.OwnerID)
+		}
 	case "shot":
 		_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im.ID, im.OwnerID)
+	case "cover":
+		_, _ = db.Exec(`UPDATE episodes SET cover_image_id=? WHERE id=?`, im.ID, im.OwnerID)
 	}
 	touchProject(im.ProjectID)
 	writeJSON(w, map[string]any{"ok": true})
@@ -295,6 +306,9 @@ func handleImageDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = db.Exec(`UPDATE assets SET picked_image_id=0 WHERE picked_image_id=?`, im.ID)
+	_, _ = db.Exec(`UPDATE assets SET sheet_image_id=0 WHERE sheet_image_id=?`, im.ID)
+	_, _ = db.Exec(`UPDATE assets SET expr_image_id=0 WHERE expr_image_id=?`, im.ID)
+	_, _ = db.Exec(`UPDATE episodes SET cover_image_id=0 WHERE cover_image_id=?`, im.ID)
 	_, _ = db.Exec(`UPDATE shots SET picked_image_id=0 WHERE picked_image_id=?`, im.ID)
 	deleteImageRow(im)
 	writeJSON(w, map[string]any{"ok": true})
@@ -305,6 +319,7 @@ func handleImageDelete(w http.ResponseWriter, r *http.Request) {
 type Task struct {
 	ID         int64  `json:"id"`
 	ProjectID  int64  `json:"project_id"`
+	EpisodeID  int64  `json:"episode_id"`
 	Kind       string `json:"kind"`
 	OwnerType  string `json:"owner_type"`
 	OwnerID    int64  `json:"owner_id"`
@@ -314,13 +329,13 @@ type Task struct {
 	FinishedAt int64  `json:"finished_at"`
 }
 
-func startTask(projectID int64, kind, ownerType string, ownerID int64, fn func(ctx context.Context) error) (int64, error) {
+func startTask(projectID, episodeID int64, kind, ownerType string, ownerID int64, fn func(ctx context.Context) error) (int64, error) {
 	var busy int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE status='running' AND kind=? AND owner_type=? AND owner_id=?`, kind, ownerType, ownerID).Scan(&busy)
 	if busy > 0 {
 		return 0, errors.New("正在进行中")
 	}
-	res, err := db.Exec(`INSERT INTO tasks(project_id,kind,owner_type,owner_id,status,created_at) VALUES(?,?,?,?, 'running', ?)`, projectID, kind, ownerType, ownerID, now())
+	res, err := db.Exec(`INSERT INTO tasks(project_id,episode_id,kind,owner_type,owner_id,status,created_at) VALUES(?,?,?,?,?, 'running', ?)`, projectID, episodeID, kind, ownerType, ownerID, now())
 	if err != nil {
 		return 0, err
 	}
@@ -344,13 +359,14 @@ func startTask(projectID int64, kind, ownerType string, ownerID int64, fn func(c
 			_, _ = db.Exec(`UPDATE tasks SET status='done', finished_at=? WHERE id=?`, now(), id)
 		}
 		touchProject(projectID)
+		touchEpisode(episodeID)
 	}()
 	return id, nil
 }
 
 func listTasks(projectID int64) []*Task {
 	// 进行中的 + 最近一分钟内失败的（给前端提示）
-	rows, err := db.Query(`SELECT id,project_id,kind,owner_type,owner_id,status,error,created_at,finished_at FROM tasks WHERE project_id=? AND (status='running' OR (status='failed' AND finished_at>?)) ORDER BY id`, projectID, now()-90_000)
+	rows, err := db.Query(`SELECT id,project_id,episode_id,kind,owner_type,owner_id,status,error,created_at,finished_at FROM tasks WHERE project_id=? AND (status='running' OR (status='failed' AND finished_at>?)) ORDER BY id`, projectID, now()-90_000)
 	if err != nil {
 		return []*Task{}
 	}
@@ -358,7 +374,7 @@ func listTasks(projectID int64) []*Task {
 	out := []*Task{}
 	for rows.Next() {
 		var t Task
-		if rows.Scan(&t.ID, &t.ProjectID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.CreatedAt, &t.FinishedAt) == nil {
+		if rows.Scan(&t.ID, &t.ProjectID, &t.EpisodeID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.CreatedAt, &t.FinishedAt) == nil {
 			out = append(out, &t)
 		}
 	}
@@ -367,8 +383,8 @@ func listTasks(projectID int64) []*Task {
 
 func handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	var t Task
-	err := db.QueryRow(`SELECT id,project_id,kind,owner_type,owner_id,status,error,created_at,finished_at FROM tasks WHERE id=?`, pathID(r)).
-		Scan(&t.ID, &t.ProjectID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.CreatedAt, &t.FinishedAt)
+	err := db.QueryRow(`SELECT id,project_id,episode_id,kind,owner_type,owner_id,status,error,created_at,finished_at FROM tasks WHERE id=?`, pathID(r)).
+		Scan(&t.ID, &t.ProjectID, &t.EpisodeID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.CreatedAt, &t.FinishedAt)
 	if err != nil {
 		httpErr(w, 404, "任务不存在")
 		return

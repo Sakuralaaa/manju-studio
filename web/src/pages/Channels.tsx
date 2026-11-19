@@ -3,10 +3,10 @@ import { Plus, Pencil, Trash2, RefreshCw, Check, Search, KeyRound, X } from 'luc
 import { api, type Cap, type Caps, type Channel, type Preset } from '../api'
 import { useStore } from '../store'
 import { Empty, Modal, Segmented, Select, Spinner, TagInput } from '../components/ui'
-import { apiTypeLabels, capLabels, modeLabels, valueLabel } from '../labels'
+import { apiTypeLabels, capLabels, modeLabels, valueLabel, voiceTypeNames } from '../labels'
 import { PageHead } from './Projects'
 
-type Kind = 'image' | 'text'
+type Kind = 'image' | 'text' | 'voice'
 
 export default function Channels() {
   const { channels, reloadChannels, toast } = useStore()
@@ -23,14 +23,14 @@ export default function Channels() {
   return (
     <div className="page page-narrow">
       <PageHead title="渠道">
-        <Segmented block={false} value={kind} onChange={v => pick(v as Kind)} options={[{ value: 'image', label: '生图' }, { value: 'text', label: '文本' }]} />
+        <Segmented block={false} value={kind} onChange={v => pick(v as Kind)} options={[{ value: 'image', label: '生图' }, { value: 'text', label: '文本' }, { value: 'voice', label: '语音' }]} />
       </PageHead>
       <div className="channels">
         <div className="toolbar">
-          <span className="toolbar-title">{list.length} 个{kind === 'image' ? '生图' : '文本'}渠道</span><span className="grow" />
+          <span className="toolbar-title">{list.length} 个{kindName[kind]}渠道</span><span className="grow" />
           <button className="btn btn-primary" onClick={() => setEdit({ kind })}><Plus size={16} />新建渠道</button>
         </div>
-        {list.length === 0 && <div className="card card-empty"><Empty art="plug" title={kind === 'image' ? '还没有生图渠道' : '还没有文本渠道'} action={<button className="btn btn-primary" onClick={() => setEdit({ kind })}><Plus size={16} />新建渠道</button>} /></div>}
+        {list.length === 0 && <div className="card card-empty"><Empty art="plug" title={`还没有${kindName[kind]}渠道`} action={<button className="btn btn-primary" onClick={() => setEdit({ kind })}><Plus size={16} />新建渠道</button>} /></div>}
         <div className="ch-list">
           {list.map(c => (
             <article key={c.id} className="card ch">
@@ -44,7 +44,9 @@ export default function Channels() {
                 </div>
                 <div className="ch-tags">
                   {c.kind === 'image' && <span className="mini-tag">{apiTypeLabels[c.api_type]}</span>}
-                  <span className="mini-tag">{c.models.length} 个模型</span>
+                  {c.kind === 'voice' && <span className="mini-tag">{voiceTypeNames[c.api_type]}</span>}
+                  {c.kind !== 'voice' && <span className="mini-tag">{c.models.length} 个模型</span>}
+                  {c.kind === 'voice' && c.models.slice(0, 2).map(m => <span key={m} className="mini-tag">{m}</span>)}
                   {c.key_tail && <span className="mini-tag"><KeyRound size={12} />{c.key_tail}</span>}
                   {c.kind === 'text' && c.models.slice(0, 3).map(m => <span key={m} className="mini-tag">{m}</span>)}
                 </div>
@@ -58,8 +60,60 @@ export default function Channels() {
           ))}
         </div>
       </div>
-      {edit && <ChannelEditor initial={edit} onClose={() => setEdit(null)} onSaved={async () => { setEdit(null); await reloadChannels(); toast('渠道已保存') }} />}
+      {edit && edit.kind === 'voice' && <VoiceChannelEditor initial={edit} onClose={() => setEdit(null)} onSaved={async () => { setEdit(null); await reloadChannels(); toast('渠道已保存') }} />}
+      {edit && edit.kind !== 'voice' && <ChannelEditor initial={edit} onClose={() => setEdit(null)} onSaved={async () => { setEdit(null); await reloadChannels(); toast('渠道已保存') }} />}
     </div>
+  )
+}
+
+const kindName: Record<Kind, string> = { image: '生图', text: '文本', voice: '语音' }
+const voiceBase: Record<string, string> = { fish: 'https://api.fish.audio', mimo: 'https://api.xiaomimimo.com/v1', openai: '' }
+const fishModels = ['s2.1-pro', 's2-pro', 's2.1-pro-free', 's3-pro', 'drama-3', 's1']
+
+function VoiceChannelEditor({ initial, onClose, onSaved }: { initial: Partial<Channel>; onClose: () => void; onSaved: () => void }) {
+  const { toast } = useStore()
+  const isNew = !initial.id
+  const [ch, setCh] = useState<Partial<Channel>>(() => ({ name: '', api_type: 'fish', base_url: voiceBase.fish, models: ['s2.1-pro'], voices: [], ...initial, ...(initial.id ? { api_key: '' } : { api_key: '' }) }))
+  const [probe, setProbe] = useState<{ busy: boolean; ok?: boolean; msg?: string }>({ busy: false })
+  const [saving, setSaving] = useState(false)
+  const setType = (t: string) => setCh(c => ({ ...c, api_type: t as any, base_url: !c.base_url || Object.values(voiceBase).includes(c.base_url) ? voiceBase[t] : c.base_url,
+    models: t === 'fish' ? ['s2.1-pro'] : t === 'mimo' ? ['mimo-v2.5-tts'] : ['tts-1'], name: c.name || voiceTypeNames[t] }))
+  const doProbe = async () => {
+    setProbe({ busy: true })
+    try {
+      const r = await api<{ ok: boolean; error?: string; latency_ms?: number }>('/api/channels/probe', { body: { id: initial.id || 0, base_url: ch.base_url, api_key: ch.api_key, api_type: ch.api_type } })
+      setProbe({ busy: false, ok: r.ok, msg: r.ok ? `连接正常 · ${r.latency_ms} 毫秒` : r.error })
+    } catch (e: any) { setProbe({ busy: false, ok: false, msg: e.message }) }
+  }
+  const save = async () => {
+    if (!ch.name?.trim() || !ch.base_url?.trim()) { toast('名称和接口地址不能为空', 'info'); return }
+    setSaving(true)
+    try { await api(isNew ? '/api/channels' : `/api/channels/${initial.id}`, { method: isNew ? 'POST' : 'PUT', body: { ...ch, kind: 'voice' } }); onSaved() } catch (e: any) { toast(e.message, 'err') } finally { setSaving(false) }
+  }
+  return (
+    <Modal open onClose={onClose} title={isNew ? '新建语音渠道' : '编辑渠道'}
+      footer={<><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" onClick={save} disabled={saving}>{saving && <Spinner />}保存</button></>}>
+      <div className="field"><span className="field-label">类型</span>
+        <Segmented value={ch.api_type || 'fish'} onChange={setType} disabled={!isNew} options={['fish', 'mimo', 'openai'].map(t => ({ value: t, label: voiceTypeNames[t] }))} />
+      </div>
+      <label className="field"><span className="field-label">名称</span><input className="input" value={ch.name || ''} onChange={e => setCh({ ...ch, name: e.target.value })} placeholder={voiceTypeNames[ch.api_type || 'fish']} /></label>
+      <label className="field"><span className="field-label">接口地址</span><input className="input" value={ch.base_url || ''} onChange={e => setCh({ ...ch, base_url: e.target.value })} placeholder="https://example.com/v1" /></label>
+      <label className="field"><span className="field-label">密钥</span>
+        <input className="input" type="password" autoComplete="new-password" value={ch.api_key || ''} onChange={e => setCh({ ...ch, api_key: e.target.value })} placeholder={initial.key_tail ? `已保存 ${initial.key_tail}，留空不修改` : '粘贴密钥'} />
+      </label>
+      {ch.api_type === 'fish' && <div className="field"><span className="field-label">合成模型</span>
+        <div className="chips">{fishModels.map(m => <button key={m} type="button" className={`chip ${ch.models?.[0] === m ? 'is-on' : ''}`} onClick={() => setCh({ ...ch, models: [m] })}>{m}</button>)}</div>
+      </div>}
+      {ch.api_type === 'openai' && <>
+        <div className="field"><span className="field-label">模型</span><TagInput value={ch.models || []} onChange={v => setCh({ ...ch, models: v })} placeholder="tts-1，输入后回车" /></div>
+        <div className="field"><span className="field-label">音色</span><TagInput value={ch.voices || []} onChange={v => setCh({ ...ch, voices: v })} placeholder="alloy，输入后回车" /></div>
+      </>}
+      <div className="row-actions">
+        {probe.msg && <span className={`probe ${probe.ok ? 'ok' : 'err'}`}>{probe.ok ? <Check size={13} /> : <X size={13} />}{probe.msg}</span>}
+        <span className="grow" />
+        {ch.api_type !== 'mimo' && <button className="btn btn-secondary btn-sm" onClick={doProbe} disabled={probe.busy || !ch.base_url}>{probe.busy ? <Spinner size={13} /> : <RefreshCw size={13} />}测试连接</button>}
+      </div>
+    </Modal>
   )
 }
 

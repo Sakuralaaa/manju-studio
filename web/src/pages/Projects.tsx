@@ -30,7 +30,7 @@ export default function Projects() {
       </PageHead>
       {!list && <div className="loading"><Spinner size={20} /></div>}
       {list && list.length === 0 && (
-        <div className="card card-empty"><Empty art="frame" title="还没有作品" text="从一个故事创意开始。" action={<button className="btn btn-primary" onClick={() => setCreating(true)}><Plus size={16} />新建作品</button>} /></div>
+        <div className="card card-empty"><Empty art="frame" title="还没有作品" action={<button className="btn btn-primary" onClick={() => setCreating(true)}><Plus size={16} />新建作品</button>} /></div>
       )}
       {list && list.length > 0 && (
         <div className="pgrid">
@@ -38,10 +38,10 @@ export default function Projects() {
             const done = p.steps.filter(Boolean).length
             const next = p.steps.findIndex(x => !x)
             return (
-              <article key={p.id} className="pcard2" onClick={() => go({ page: 'project', id: p.id })}>
+              <article key={p.id} className="pcard2" onClick={() => go({ page: 'series', id: p.id })}>
                 <div className="pcover">
                   {p.cover ? <img src={p.cover} alt="" loading="lazy" /> : <div className="pcover-empty"><Clapperboard size={28} strokeWidth={1.5} /></div>}
-                  {p.final_url && <span className="pbadge"><Film size={12} />成片</span>}
+                  <span className="pbadge"><Film size={12} />{p.finished ? `${p.finished} / ${p.episodes} 集成片` : `${p.episodes} 集`}</span>
                 </div>
                 <div className="pbody">
                   <h3 className="ptitle" title={p.title}>{p.title}</h3>
@@ -50,7 +50,7 @@ export default function Projects() {
                     {p.steps.map((d, i) => <i key={i} className={d ? 'is-done' : i === next ? 'is-next' : ''} title={stepNames[i]} />)}
                   </div>
                   <div className="pmeta">
-                    <span>{next < 0 ? '已完成' : `下一步 · ${stepNames[next]}`}</span>
+                    <span>{next < 0 ? `第 ${p.next_no} 集已成片` : `第 ${p.next_no} 集 · ${stepNames[next]}`}</span>
                     <span className="grow" />
                     <span>{fmtTime(p.updated_at)}</span>
                   </div>
@@ -76,7 +76,7 @@ function CreateProject({ onClose }: { onClose: () => void }) {
     setBusy(true)
     try {
       const p = await api<{ id: number }>('/api/projects', { body: { title, idea, style, aspect } })
-      go({ page: 'project', id: p.id, step: idea.trim() ? 2 : 1 })
+      go({ page: 'series', id: p.id, tab: 'bible' })
     } catch (e: any) { toast(e.message, 'err'); setBusy(false) }
   }
   return (

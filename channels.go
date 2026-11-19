@@ -44,7 +44,8 @@ type Channel struct {
 	Caps      Caps     `json:"caps"`
 	Sort      int      `json:"sort"`
 	CreatedAt int64    `json:"created_at"`
-	Kind      string   `json:"kind"` // image / text
+	Kind      string   `json:"kind"` // image / text / voice
+	Voices    []string `json:"voices"`
 }
 
 var allRatios = []string{"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "9:19.5", "19.5:9", "9:20", "20:9", "21:9", "5:2"}
@@ -156,8 +157,13 @@ func keyTail(k string) string {
 func scanChannel(sc interface{ Scan(...any) error }) (*Channel, error) {
 	var c Channel
 	var models, caps string
-	if err := sc.Scan(&c.ID, &c.Name, &c.BaseURL, &c.APIKey, &c.APIType, &models, &caps, &c.Sort, &c.CreatedAt, &c.Kind); err != nil {
+	var voices string
+	if err := sc.Scan(&c.ID, &c.Name, &c.BaseURL, &c.APIKey, &c.APIType, &models, &caps, &c.Sort, &c.CreatedAt, &c.Kind, &voices); err != nil {
 		return nil, err
+	}
+	_ = json.Unmarshal([]byte(voices), &c.Voices)
+	if c.Voices == nil {
+		c.Voices = []string{}
 	}
 	_ = json.Unmarshal([]byte(models), &c.Models)
 	_ = json.Unmarshal([]byte(caps), &c.Caps)
@@ -168,7 +174,7 @@ func scanChannel(sc interface{ Scan(...any) error }) (*Channel, error) {
 	return &c, nil
 }
 
-const chanCols = `id,name,base_url,api_key,api_type,models,caps,sort,created_at,kind`
+const chanCols = `id,name,base_url,api_key,api_type,models,caps,sort,created_at,kind,voices`
 
 func getChannel(id int64) (*Channel, error) {
 	return scanChannel(db.QueryRow(`SELECT `+chanCols+` FROM channels WHERE id=?`, id))
@@ -230,23 +236,33 @@ func handleChannelSave(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "名称和接口地址不能为空")
 		return
 	}
-	if in.Kind != "text" {
+	if in.Kind != "text" && in.Kind != "voice" {
 		in.Kind = "image"
 	}
-	if in.Kind == "text" {
+	switch in.Kind {
+	case "text":
 		in.APIType = "chat"
-	} else if in.APIType != "chat" {
-		in.APIType = "images"
+	case "voice":
+		if in.APIType != "fish" && in.APIType != "mimo" {
+			in.APIType = "openai"
+		}
+	default:
+		if in.APIType != "chat" {
+			in.APIType = "images"
+		}
 	}
 	if in.Models == nil {
 		in.Models = []string{}
+	}
+	if in.Voices == nil {
+		in.Voices = []string{}
 	}
 	id := pathID(r)
 	if id == 0 {
 		var maxSort int
 		_ = db.QueryRow(`SELECT COALESCE(MAX(sort),0) FROM channels`).Scan(&maxSort)
-		res, err := db.Exec(`INSERT INTO channels(kind,name,base_url,api_key,api_type,models,caps,sort,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-			in.Kind, in.Name, in.BaseURL, strings.TrimSpace(in.APIKey), in.APIType, mustJSON(in.Models), mustJSON(in.Caps), maxSort+1, now())
+		res, err := db.Exec(`INSERT INTO channels(kind,name,base_url,api_key,api_type,models,caps,sort,created_at,voices) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			in.Kind, in.Name, in.BaseURL, strings.TrimSpace(in.APIKey), in.APIType, mustJSON(in.Models), mustJSON(in.Caps), maxSort+1, now(), mustJSON(in.Voices))
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -262,8 +278,8 @@ func handleChannelSave(w http.ResponseWriter, r *http.Request) {
 		if key == "" {
 			key = old.APIKey
 		}
-		_, err = db.Exec(`UPDATE channels SET name=?,base_url=?,api_key=?,api_type=?,models=?,caps=? WHERE id=?`,
-			in.Name, in.BaseURL, key, in.APIType, mustJSON(in.Models), mustJSON(in.Caps), id)
+		_, err = db.Exec(`UPDATE channels SET name=?,base_url=?,api_key=?,api_type=?,models=?,caps=?,voices=? WHERE id=?`,
+			in.Name, in.BaseURL, key, in.APIType, mustJSON(in.Models), mustJSON(in.Caps), mustJSON(in.Voices), id)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -289,6 +305,7 @@ func handleChannelProbe(w http.ResponseWriter, r *http.Request) {
 		ID      int64  `json:"id"`
 		BaseURL string `json:"base_url"`
 		APIKey  string `json:"api_key"`
+		APIType string `json:"api_type"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, err.Error())
@@ -311,9 +328,16 @@ func handleChannelProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	req, _ := http.NewRequestWithContext(r.Context(), "GET", apiURL(base, "/models"), nil)
+	u := apiURL(base, "/models")
+	if in.APIType == "fish" {
+		u = strings.TrimSuffix(normBase(base), "/v1") + "/model?self=true&page_size=1"
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), "GET", u, nil)
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
+		if in.APIType == "mimo" {
+			req.Header.Set("api-key", key)
+		}
 	}
 	cl := &http.Client{Timeout: 25 * time.Second}
 	resp, err := cl.Do(req)
@@ -325,6 +349,10 @@ func handleChannelProbe(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode >= 300 {
 		writeJSON(w, map[string]any{"ok": false, "error": fmt.Sprintf("HTTP %d：%s", resp.StatusCode, upstreamMsg(body))})
+		return
+	}
+	if in.APIType == "fish" {
+		writeJSON(w, map[string]any{"ok": true, "models": []string{}, "latency_ms": time.Since(start).Milliseconds()})
 		return
 	}
 	var parsed struct {

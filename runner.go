@@ -33,13 +33,17 @@ type ColabCfg struct {
 	ClipMinTurbo float64            `json:"clip_min_turbo"`
 	JobTimeout   int                `json:"job_timeout_min"`
 	Rates        map[string]float64 `json:"rates"`
+	UpscaleMin   float64            `json:"upscale_min"`
+	InterpMin    float64            `json:"interp_min"`
+	Mirror       string             `json:"mirror"`
+	DriveCache   bool               `json:"drive_cache"`
 }
 
 // CU 每小时消耗（第三方估算，可在设置里改）
 var defaultRates = map[string]float64{"G4": 8.9, "A100": 11.77, "L4": 4.82, "T4": 1.96, "H100": 18.0, "NONE": 0.07, "V5E1": 4.0, "V6E1": 6.0}
 
 func loadColabCfg() ColabCfg {
-	c := ColabCfg{Accelerator: "G4", Shape: "SHAPE_STANDARD", IdleMin: 5, MaxMin: 180, AutoStart: false, BootMin: 6, ClipMin: 4, ClipMinTurbo: 1.5, JobTimeout: 30}
+	c := ColabCfg{Accelerator: "G4", Shape: "SHAPE_STANDARD", IdleMin: 5, MaxMin: 180, AutoStart: false, BootMin: 6, ClipMin: 4, ClipMinTurbo: 1.5, JobTimeout: 30, UpscaleMin: 1.5, InterpMin: 1}
 	_ = json.Unmarshal([]byte(getSetting("colab_cfg", "{}")), &c)
 	if c.Rates == nil {
 		c.Rates = map[string]float64{}
@@ -95,6 +99,8 @@ type Runner struct {
 	stopReq     string
 	cancelJob   context.CancelFunc
 	bootCancel  context.CancelFunc
+	postReady   VideoPost
+	driveAt     time.Time
 }
 
 var runner = &Runner{Phase: "off", wake: make(chan struct{}, 1)}
@@ -285,7 +291,9 @@ func (r *Runner) bringUp(key RuntimeKey) {
 		}
 		r.mu.Lock()
 		r.Booted = true
+		bootSec := float64(now()-r.ReadyAt) / 1000
 		r.mu.Unlock()
+		_, _ = db.Exec(`UPDATE sessions SET boot_sec=? WHERE id=?`, bootSec, r.SessionID)
 	}
 	r.setPhase("ready", "")
 	r.touch()
@@ -338,6 +346,9 @@ func (r *Runner) Stop(reason string) {
 	r.mu.Unlock()
 	r.logf("关机：%s", reason)
 	go func() {
+		if loadColabCfg().DriveCache {
+			r.driveSync()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		var err error
@@ -355,6 +366,7 @@ func (r *Runner) Stop(reason string) {
 		_, _ = db.Exec(`UPDATE sessions SET status='ended', end_reason=?, jobs_done=?, ended_at=? WHERE id=?`, reason, done, now(), sid)
 		r.mu.Lock()
 		r.Phase, r.Runtime, r.jup, r.conn, r.Booted, r.CurrentJob, r.Stage, r.StagePct = "off", "", nil, nil, false, 0, "", 0
+		r.postReady = VideoPost{}
 		r.StartedAt, r.ReadyAt = 0, 0
 		if strings.HasPrefix(reason, "开机失败") {
 			_ = setSetting("colab_autostart_block", "1") // 开机失败后不再自动重试，等手动开机
@@ -440,6 +452,10 @@ func (r *Runner) tick() {
 		r.Stop("达到最长会话时长")
 		return
 	}
+	if cfg.DriveCache && booted && time.Since(r.driveAt) > 10*time.Minute {
+		r.driveAt = time.Now()
+		go r.driveSync()
+	}
 	if queued > 0 && purpose == "video" && booted {
 		r.runNext(cfg)
 		return
@@ -453,16 +469,18 @@ func (r *Runner) tick() {
 }
 
 func (r *Runner) bootstrap(ctx context.Context) error {
+	return r.bootstrapWith(ctx, r.neededPost())
+}
+
+func (r *Runner) bootstrapWith(ctx context.Context, post VideoPost) error {
 	cfgText := workflowText("boot")
 	var boot map[string]any
 	_ = json.Unmarshal([]byte(cfgText), &boot)
-	var files []map[string]any
-	_ = json.Unmarshal([]byte(workflowText("files")), &files)
-	boot["files"] = files
-	code := strings.Replace(bootstrapPy, "__CFG__", base64.StdEncoding.EncodeToString([]byte(mustJSON(boot))), 1)
 	r.mu.Lock()
 	jup := r.jup
 	r.mu.Unlock()
+	boot = bootConfig(ctx, jup, boot, post)
+	code := strings.Replace(bootstrapPy, "__CFG__", base64.StdEncoding.EncodeToString([]byte(mustJSON(boot))), 1)
 	bctx, cancel := context.WithTimeout(ctx, 60*time.Minute)
 	defer cancel()
 	var buf strings.Builder
@@ -490,6 +508,9 @@ func (r *Runner) bootstrap(ctx context.Context) error {
 	if !strings.Contains(res.Stdout, "[mj] READY") {
 		return errors.New("准备环境没有完成")
 	}
+	r.mu.Lock()
+	r.postReady = post
+	r.mu.Unlock()
 	return nil
 }
 
@@ -552,6 +573,9 @@ func (r *Runner) runNext(cfg ColabCfg) {
 		r.mu.Unlock()
 		r.poke()
 	}()
+	if err := r.ensurePost(ctx, v.Post); err != nil {
+		r.logf("准备后期环境失败：%s", err.Error())
+	}
 	_, _ = db.Exec(`UPDATE videos SET status='running', stage='上传关键帧', progress=0, started_at=?, session_id=?, error='' WHERE id=?`, now(), sid, id)
 	r.logf("开始视频 #%d", id)
 	start := time.Now()
@@ -585,6 +609,12 @@ func (r *Runner) runNext(cfg ColabCfg) {
 		size = fi.Size()
 	}
 	_, _ = db.Exec(`UPDATE videos SET status='done', file=?, bytes=?, progress=1, stage='', finished_at=? WHERE id=?`, out, size, now(), id)
+	mins := time.Since(start).Minutes()
+	r.mu.Lock()
+	acc := r.Accelerator
+	r.mu.Unlock()
+	_, _ = db.Exec(`INSERT INTO ledger(project_id,episode_id,kind,count,minutes,cu,est_cu,ref_id,session_id,created_at) VALUES(?,?, 'video', 1, ?,?,?,?,?,?)`,
+		v.ProjectID, v.EpisodeID, mins, mins/60*cfg.rate(acc), v.EstCU, id, sid, now())
 	if v.ShotID > 0 {
 		_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=? AND (picked_video_id=0 OR picked_video_id NOT IN (SELECT id FROM videos WHERE status='done'))`, id, v.ShotID)
 		touchProject(v.ProjectID)
@@ -603,6 +633,17 @@ func (r *Runner) renderVideo(ctx context.Context, jup *Jupyter, v *Video, cfg Co
 	if err := jup.Upload(ctx, "/content/ComfyUI/input/"+remote, img); err != nil {
 		return "", err
 	}
+	lastRemote := ""
+	if v.LastImageFile != "" {
+		img2, err := os.ReadFile(filepath.Join(dataDir, "images", v.LastImageFile))
+		if err != nil {
+			return "", errors.New("尾帧文件不存在")
+		}
+		lastRemote = fmt.Sprintf("mj_%d_last_%s%s", v.ID, randHex(3), filepath.Ext(v.LastImageFile))
+		if err := jup.Upload(ctx, "/content/ComfyUI/input/"+lastRemote, img2); err != nil {
+			return "", err
+		}
+	}
 	key := "standard"
 	if v.Turbo {
 		key = "turbo"
@@ -617,6 +658,17 @@ func (r *Runner) renderVideo(ctx context.Context, jup *Jupyter, v *Video, cfg Co
 	})
 	if err != nil {
 		return "", errors.New("工作流格式错误：" + err.Error())
+	}
+	if lastRemote != "" {
+		if err := injectLastFrame(wf, lastRemote); err != nil {
+			return "", err
+		}
+	}
+	if v.Post.Upscale || v.Post.Interp {
+		pw, ph := deliverDimsFor(v.Aspect)
+		if err := injectPost(wf, v.Post, pw, ph); err != nil {
+			return "", err
+		}
 	}
 	code := strings.Replace(jobPy, "__WF__", base64.StdEncoding.EncodeToString([]byte(mustJSON(wf))), 1)
 	code = strings.Replace(code, "__TIMEOUT__", strconv.Itoa(cfg.JobTimeout*60), 1)
@@ -732,6 +784,7 @@ func handleColabState(w http.ResponseWriter, r *http.Request) {
 		"cfg":        cfg,
 		"runner":     runner.brief(),
 		"sessions":   sessions,
+		"drive":      driveView(r.Context()),
 	})
 }
 
@@ -767,6 +820,14 @@ func handleColabSettings(w http.ResponseWriter, r *http.Request) {
 		cur.JobTimeout = in.JobTimeout
 	}
 	cur.AutoStart = in.AutoStart
+	if in.UpscaleMin > 0 {
+		cur.UpscaleMin = in.UpscaleMin
+	}
+	if in.InterpMin > 0 {
+		cur.InterpMin = in.InterpMin
+	}
+	cur.Mirror = strings.TrimRight(strings.TrimSpace(in.Mirror), "/")
+	cur.DriveCache = in.DriveCache
 	for k, v := range in.Rates {
 		if v >= 0 {
 			cur.Rates[k] = v

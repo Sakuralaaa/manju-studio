@@ -2,91 +2,69 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
-	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 )
 
-type Project struct {
-	ID             int64  `json:"id"`
-	Title          string `json:"title"`
-	Idea           string `json:"idea"`
-	Style          string `json:"style"`
-	Aspect         string `json:"aspect"`
-	EpisodeSec     int    `json:"episode_sec"`
-	ShotTarget     int    `json:"shot_target"`
-	Script         string `json:"script"`
-	TextChannelID  int64  `json:"text_channel_id"`
-	TextModel      string `json:"text_model"`
-	ImageChannelID int64  `json:"image_channel_id"`
-	ImageModel     string `json:"image_model"`
-	VideoSec       int    `json:"video_sec"`
-	VideoRes       string `json:"video_res"`
-	VideoTurbo     bool   `json:"video_turbo"`
-	FinalFile      string `json:"final_file"`
-	FinalURL       string `json:"final_url"`
-	FinalAt        int64  `json:"final_at"`
-	CreatedAt      int64  `json:"created_at"`
-	UpdatedAt      int64  `json:"updated_at"`
-}
-
-const projCols = `id,title,idea,style,aspect,episode_sec,shot_target,script,text_channel_id,text_model,image_channel_id,image_model,video_sec,video_res,video_turbo,final_file,final_at,created_at,updated_at`
-
-func scanProject(sc interface{ Scan(...any) error }) (*Project, error) {
-	var p Project
-	var turbo int
-	if err := sc.Scan(&p.ID, &p.Title, &p.Idea, &p.Style, &p.Aspect, &p.EpisodeSec, &p.ShotTarget, &p.Script, &p.TextChannelID, &p.TextModel, &p.ImageChannelID, &p.ImageModel, &p.VideoSec, &p.VideoRes, &turbo, &p.FinalFile, &p.FinalAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
-		return nil, err
-	}
-	p.VideoTurbo = turbo == 1
-	if p.FinalFile != "" {
-		p.FinalURL = "/files/videos/" + p.FinalFile
-	}
-	return &p, nil
-}
-
-func getProject(id int64) (*Project, error) {
-	return scanProject(db.QueryRow(`SELECT `+projCols+` FROM projects WHERE id=?`, id))
-}
-
-func touchProject(id int64) {
-	if id > 0 {
-		_, _ = db.Exec(`UPDATE projects SET updated_at=? WHERE id=?`, now(), id)
-	}
-}
+// ---------- 资产（跨集共享） ----------
 
 type Asset struct {
-	ID            int64    `json:"id"`
-	ProjectID     int64    `json:"project_id"`
-	Kind          string   `json:"kind"`
-	Code          string   `json:"code"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description"`
-	Prompt        string   `json:"prompt"`
-	PickedImageID int64    `json:"picked_image_id"`
-	Sort          int      `json:"sort"`
-	Images        []*Image `json:"images"`
+	ID            int64     `json:"id"`
+	ProjectID     int64     `json:"project_id"`
+	Kind          string    `json:"kind"`
+	Code          string    `json:"code"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description"`
+	Prompt        string    `json:"prompt"`
+	PickedImageID int64     `json:"picked_image_id"`
+	SheetImageID  int64     `json:"sheet_image_id"`
+	ExprImageID   int64     `json:"expr_image_id"`
+	Voice         VoiceSpec `json:"voice"`
+	Sort          int       `json:"sort"`
+	Images        []*Image  `json:"images"`
+	Appear        int       `json:"appear"`
 }
 
-const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sort`
+const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort`
 
 func scanAsset(sc interface{ Scan(...any) error }) (*Asset, error) {
 	var a Asset
-	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.Sort); err != nil {
+	var voice string
+	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort); err != nil {
 		return nil, err
 	}
+	_ = json.Unmarshal([]byte(voice), &a.Voice)
 	a.Images = []*Image{}
 	return &a, nil
 }
 
 func getAsset(id int64) (*Asset, error) {
 	return scanAsset(db.QueryRow(`SELECT `+assetCols+` FROM assets WHERE id=?`, id))
+}
+
+// appearCounts 每个资产编号在全剧分镜里出现的次数（判断主角用）
+func appearCounts(pid int64) map[string]int {
+	out := map[string]int{}
+	rows, err := db.Query(`SELECT asset_codes FROM shots WHERE project_id=?`, pid)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s string
+		var codes []string
+		if rows.Scan(&s) == nil && json.Unmarshal([]byte(s), &codes) == nil {
+			for _, c := range codes {
+				out[c]++
+			}
+		}
+	}
+	return out
 }
 
 func listAssets(pid int64) []*Asset {
@@ -101,15 +79,20 @@ func listAssets(pid int64) []*Asset {
 		}
 	}
 	rows.Close()
+	counts := appearCounts(pid)
 	for _, a := range out {
 		a.Images = listImages(`WHERE owner_type='asset' AND owner_id=? ORDER BY id`, a.ID)
+		a.Appear = counts[a.Code]
 	}
 	return out
 }
 
+// ---------- 镜头 ----------
+
 type Shot struct {
 	ID             int64    `json:"id"`
 	ProjectID      int64    `json:"project_id"`
+	EpisodeID      int64    `json:"episode_id"`
 	Sort           int      `json:"sort"`
 	Code           string   `json:"code"`
 	Duration       float64  `json:"duration"`
@@ -121,21 +104,32 @@ type Shot struct {
 	VideoPrompt    string   `json:"video_prompt"`
 	PickedImageID  int64    `json:"picked_image_id"`
 	PickedVideoID  int64    `json:"picked_video_id"`
+	Chain          string   `json:"chain"`
+	SfxFile        string   `json:"-"`
+	SfxURL         string   `json:"sfx_url"`
+	SfxName        string   `json:"sfx_name"`
+	SfxVolume      float64  `json:"sfx_volume"`
 	Images         []*Image `json:"images"`
 	Videos         []*Video `json:"videos"`
 }
 
-const shotCols = `id,project_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id`
+const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume`
 
 func scanShot(sc interface{ Scan(...any) error }) (*Shot, error) {
 	var s Shot
 	var codes string
-	if err := sc.Scan(&s.ID, &s.ProjectID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID); err != nil {
+	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(codes), &s.Assets)
 	if s.Assets == nil {
 		s.Assets = []string{}
+	}
+	if s.SfxFile != "" {
+		s.SfxURL = "/files/audio/" + s.SfxFile
+	}
+	if s.Chain == "" {
+		s.Chain = "off"
 	}
 	s.Images = []*Image{}
 	s.Videos = []*Video{}
@@ -143,11 +137,18 @@ func scanShot(sc interface{ Scan(...any) error }) (*Shot, error) {
 }
 
 func getShot(id int64) (*Shot, error) {
-	return scanShot(db.QueryRow(`SELECT `+shotCols+` FROM shots WHERE id=?`, id))
+	s, err := scanShot(db.QueryRow(`SELECT `+shotCols+` FROM shots WHERE id=?`, id))
+	if err != nil {
+		return nil, err
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM shots WHERE episode_id=? AND (sort<? OR (sort=? AND id<?))`, s.EpisodeID, s.Sort, s.Sort, s.ID).Scan(&n)
+	s.Code = fmt.Sprintf("%02d", n+1)
+	return s, nil
 }
 
-func listShots(pid int64, withMedia bool) []*Shot {
-	rows, err := db.Query(`SELECT `+shotCols+` FROM shots WHERE project_id=? ORDER BY sort, id`, pid)
+func listShots(eid int64, withMedia bool) []*Shot {
+	rows, err := db.Query(`SELECT `+shotCols+` FROM shots WHERE episode_id=? ORDER BY sort, id`, eid)
 	if err != nil {
 		return []*Shot{}
 	}
@@ -168,291 +169,73 @@ func listShots(pid int64, withMedia bool) []*Shot {
 	return out
 }
 
-// ---------- 列表 / 创建 / 详情 ----------
-
-type ProjectCard struct {
-	*Project
-	Cover      string `json:"cover"`
-	Shots      int    `json:"shots"`
-	Assets     int    `json:"assets"`
-	Keyframes  int    `json:"keyframes"`
-	Videos     int    `json:"videos"`
-	Steps      []bool `json:"steps"`
-	ScriptSize int    `json:"script_size"`
-}
-
-func handleProjectList(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`SELECT ` + projCols + ` FROM projects ORDER BY updated_at DESC`)
-	if err != nil {
-		httpErr(w, 500, err.Error())
-		return
-	}
-	var ps []*Project
-	for rows.Next() {
-		if p, err := scanProject(rows); err == nil {
-			ps = append(ps, p)
+// prevShot 同一集里的上一个镜头
+func prevShot(s *Shot) *Shot {
+	shots := listShots(s.EpisodeID, true)
+	for i, x := range shots {
+		if x.ID == s.ID && i > 0 {
+			return shots[i-1]
 		}
 	}
-	rows.Close()
-	out := []*ProjectCard{}
-	for _, p := range ps {
-		c := &ProjectCard{Project: p}
-		st := projectSteps(p)
-		c.Steps = st.Done
-		c.Shots, c.Assets, c.Keyframes, c.Videos = st.Shots, st.Assets, st.Keyframes, st.Videos
-		c.ScriptSize = len([]rune(p.Script))
-		c.Script = ""
-		// 封面：第一张选定的关键帧，否则第一张选定的资产图
-		var file string
-		_ = db.QueryRow(`SELECT i.file FROM shots s JOIN images i ON i.id=s.picked_image_id WHERE s.project_id=? ORDER BY s.sort, s.id LIMIT 1`, p.ID).Scan(&file)
-		if file == "" {
-			_ = db.QueryRow(`SELECT i.file FROM assets a JOIN images i ON i.id=a.picked_image_id WHERE a.project_id=? ORDER BY CASE a.kind WHEN 'scene' THEN 0 WHEN 'character' THEN 1 ELSE 2 END, a.id LIMIT 1`, p.ID).Scan(&file)
-		}
-		if file != "" {
-			c.Cover = "/files/images/" + file
-		}
-		out = append(out, c)
-	}
-	writeJSON(w, out)
-}
-
-type projectIn struct {
-	Title          *string `json:"title"`
-	Idea           *string `json:"idea"`
-	Style          *string `json:"style"`
-	Aspect         *string `json:"aspect"`
-	EpisodeSec     *int    `json:"episode_sec"`
-	ShotTarget     *int    `json:"shot_target"`
-	Script         *string `json:"script"`
-	TextChannelID  *int64  `json:"text_channel_id"`
-	TextModel      *string `json:"text_model"`
-	ImageChannelID *int64  `json:"image_channel_id"`
-	ImageModel     *string `json:"image_model"`
-	VideoSec       *int    `json:"video_sec"`
-	VideoRes       *string `json:"video_res"`
-	VideoTurbo     *bool   `json:"video_turbo"`
-}
-
-func handleProjectCreate(w http.ResponseWriter, r *http.Request) {
-	var in projectIn
-	_ = readJSON(r, &in)
-	title := "未命名作品"
-	if in.Title != nil && strings.TrimSpace(*in.Title) != "" {
-		title = strings.TrimSpace(*in.Title)
-	}
-	res, err := db.Exec(`INSERT INTO projects(title,created_at,updated_at) VALUES(?,?,?)`, title, now(), now())
-	if err != nil {
-		httpErr(w, 500, err.Error())
-		return
-	}
-	id, _ := res.LastInsertId()
-	if err := applyProject(id, in); err != nil {
-		httpErr(w, 400, err.Error())
-		return
-	}
-	p, _ := getProject(id)
-	writeJSON(w, p)
-}
-
-func applyProject(id int64, in projectIn) error {
-	set := func(col string, v any) { _, _ = db.Exec(`UPDATE projects SET `+col+`=? WHERE id=?`, v, id) }
-	if in.Title != nil {
-		t := strings.TrimSpace(*in.Title)
-		if t == "" {
-			return errors.New("标题不能为空")
-		}
-		set("title", t)
-	}
-	if in.Idea != nil {
-		set("idea", strings.TrimSpace(*in.Idea))
-	}
-	if in.Style != nil {
-		set("style", strings.TrimSpace(*in.Style))
-	}
-	if in.Aspect != nil {
-		a := *in.Aspect
-		if a != "9:16" && a != "16:9" && a != "1:1" && a != "3:4" && a != "4:3" {
-			a = "9:16"
-		}
-		set("aspect", a)
-	}
-	if in.EpisodeSec != nil {
-		set("episode_sec", clampInt(*in.EpisodeSec, 10, 600))
-	}
-	if in.ShotTarget != nil {
-		set("shot_target", clampInt(*in.ShotTarget, 1, 60))
-	}
-	if in.Script != nil {
-		set("script", *in.Script)
-	}
-	if in.TextChannelID != nil {
-		set("text_channel_id", *in.TextChannelID)
-	}
-	if in.TextModel != nil {
-		set("text_model", *in.TextModel)
-	}
-	if in.ImageChannelID != nil {
-		set("image_channel_id", *in.ImageChannelID)
-	}
-	if in.ImageModel != nil {
-		set("image_model", *in.ImageModel)
-	}
-	if in.VideoSec != nil {
-		set("video_sec", clampInt(*in.VideoSec, 5, 10))
-	}
-	if in.VideoRes != nil {
-		v := *in.VideoRes
-		if v != "480p" && v != "768p" {
-			v = "768p"
-		}
-		set("video_res", v)
-	}
-	if in.VideoTurbo != nil {
-		set("video_turbo", b2i(*in.VideoTurbo))
-	}
-	touchProject(id)
 	return nil
-}
-
-func clampInt(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
-}
-
-func handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r)
-	if _, err := getProject(id); err != nil {
-		httpErr(w, 404, "作品不存在")
-		return
-	}
-	var in projectIn
-	if err := readJSON(r, &in); err != nil {
-		httpErr(w, 400, err.Error())
-		return
-	}
-	if err := applyProject(id, in); err != nil {
-		httpErr(w, 400, err.Error())
-		return
-	}
-	p, _ := getProject(id)
-	writeJSON(w, p)
-}
-
-func handleProjectDelete(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r)
-	for _, im := range listImages(`WHERE project_id=?`, id) {
-		deleteImageRow(im)
-	}
-	for _, v := range listVideos(`WHERE project_id=? AND status IN ('done','failed','canceled')`, id) {
-		if v.File != "" {
-			_ = os.Remove(filepath.Join(dataDir, "videos", v.File))
-		}
-	}
-	_, _ = db.Exec(`UPDATE videos SET status='canceled' WHERE project_id=? AND status='queued'`, id)
-	if p, err := getProject(id); err == nil && p.FinalFile != "" {
-		_ = os.Remove(filepath.Join(dataDir, "videos", p.FinalFile))
-	}
-	for _, q := range []string{`DELETE FROM assets WHERE project_id=?`, `DELETE FROM shots WHERE project_id=?`, `DELETE FROM videos WHERE project_id=? AND status<>'running'`, `DELETE FROM tasks WHERE project_id=?`, `DELETE FROM projects WHERE id=?`} {
-		_, _ = db.Exec(q, id)
-	}
-	writeJSON(w, map[string]any{"ok": true})
-}
-
-type Steps struct {
-	Done      []bool `json:"done"`
-	Assets    int    `json:"assets"`
-	AssetsOK  int    `json:"assets_ok"`
-	Shots     int    `json:"shots"`
-	Keyframes int    `json:"keyframes"`
-	Videos    int    `json:"videos"`
-	Queued    int    `json:"queued"`
-}
-
-func projectSteps(p *Project) Steps {
-	var s Steps
-	_ = db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(picked_image_id>0),0) FROM assets WHERE project_id=?`, p.ID).Scan(&s.Assets, &s.AssetsOK)
-	_ = db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(picked_image_id>0),0) FROM shots WHERE project_id=?`, p.ID).Scan(&s.Shots, &s.Keyframes)
-	_ = db.QueryRow(`SELECT COUNT(DISTINCT shot_id) FROM videos WHERE project_id=? AND status='done' AND shot_id IN (SELECT id FROM shots WHERE project_id=?)`, p.ID, p.ID).Scan(&s.Videos)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE project_id=? AND status IN ('queued','running')`, p.ID).Scan(&s.Queued)
-	s.Done = []bool{
-		p.Title != "" && p.Idea != "",
-		strings.TrimSpace(p.Script) != "",
-		s.Assets > 0 && s.AssetsOK == s.Assets,
-		s.Shots > 0,
-		s.Shots > 0 && s.Keyframes == s.Shots,
-		s.Shots > 0 && s.Videos == s.Shots,
-		p.FinalFile != "",
-	}
-	return s
-}
-
-func handleProjectGet(w http.ResponseWriter, r *http.Request) {
-	p, err := getProject(pathID(r))
-	if err != nil {
-		httpErr(w, 404, "作品不存在")
-		return
-	}
-	writeJSON(w, map[string]any{
-		"project": p,
-		"assets":  listAssets(p.ID),
-		"shots":   listShots(p.ID, true),
-		"tasks":   listTasks(p.ID),
-		"steps":   projectSteps(p),
-		"colab":   runner.brief(),
-	})
 }
 
 // ---------- ② 剧本 ----------
 
-const scriptSystem = `你是一名专写竖屏漫剧（AI 生成的短篇动态漫画剧）的编剧。你写的单集剧本要做到：
-- 开场 3 秒内给出强钩子（冲突、悬念或反常画面），直接进入事件，不铺垫世界观；
+const scriptSystem = `你是一名专写竖屏漫剧（AI 生成的连载短篇动态漫画剧）的编剧。你写的单集剧本要做到：
+- 开场 3 秒内给出强钩子（冲突、悬念或反常画面）；如果有上一集卡点，开场直接接住它；
 - 节拍紧凑：每 5–10 秒一个情绪或信息推进，台词短、口语化，一句不超过 20 字；
 - 中段有一次反转；
 - 结尾停在悬念（卡点），让观众想看下一集；
 - 画面可拍：每一场写清地点、人物、动作和表情，避免心理描写和无法画出来的抽象内容；
-- 角色数量少而鲜明（主角 1–2 人，配角不超过 3 人），外貌特征写清楚，方便后续做角色设定图。
-只输出剧本正文，用 Markdown：先写「# 标题」，再写「## 人物」（每人一行：姓名——年龄、外貌、服装、性格），然后按「## 第 N 场 · 地点 · 时间」分场，场内用「【画面】」写动作与镜头感，用「角色名：台词」写对白，用「（旁白）」写旁白。最后单独一行写「【卡点】」说明结尾悬念。`
+- 人物沿用设定集里的姓名、外貌和说话方式，不要改名；新人物要少而鲜明。
+只输出剧本正文，用 Markdown：先写「# 标题」，再写「## 人物」（本集出场的人，每人一行：姓名——年龄、外貌、服装、性格），然后按「## 第 N 场 · 地点 · 时间」分场，场内用「【画面】」写动作与镜头感，用「角色名：台词」写对白，用「（旁白）」写旁白。最后单独一行写「【卡点】」说明结尾悬念。`
+
+func scriptTask(p *Project, e *Episode, note string) (int64, error) {
+	ch, model, err := textChannelFor(p)
+	if err != nil {
+		return 0, err
+	}
+	idea := orDefault(e.Idea, p.Idea)
+	if strings.TrimSpace(idea) == "" {
+		return 0, errors.New("先在「设定」里写下故事创意或本集梗概")
+	}
+	user := fmt.Sprintf("剧名：%s\n整体创意：%s\n本集：第 %d 集\n本集梗概：%s\n画面风格：%s\n画幅：%s\n单集时长：约 %d 秒\n目标镜头数：约 %d 个\n\n%s",
+		p.Title, p.Idea, e.No, orDefault(e.Idea, "（按总纲和前情自行安排）"), orDefault(p.Style, "不限"), p.Aspect, p.EpisodeSec, p.ShotTarget, seriesContext(p, e))
+	if strings.TrimSpace(note) != "" {
+		user += "\n额外要求：" + strings.TrimSpace(note) + "\n"
+	}
+	if strings.TrimSpace(e.Script) != "" && strings.TrimSpace(note) != "" {
+		user += "\n这是上一版剧本，请在它的基础上按额外要求修改：\n" + e.Script
+	}
+	return startTask(p.ID, e.ID, "script", "episode", e.ID, func(ctx context.Context) error {
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, scriptSystem, user, 0.9)
+		if err != nil {
+			return err
+		}
+		title := ""
+		for _, ln := range strings.Split(text, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(ln), "# ") {
+				title = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "# "))
+				break
+			}
+		}
+		_, err = db.Exec(`UPDATE episodes SET script=?, cliffhanger=?, title=CASE WHEN title='' THEN ? ELSE title END WHERE id=?`, text, cliffOf(text), title, e.ID)
+		return err
+	})
+}
 
 func handleScriptGenerate(w http.ResponseWriter, r *http.Request) {
-	p, err := getProject(pathID(r))
+	p, e, err := epCtx(pathID(r))
 	if err != nil {
-		httpErr(w, 404, "作品不存在")
+		httpErr(w, 404, err.Error())
 		return
 	}
 	var in struct {
 		Note string `json:"note"`
 	}
 	_ = readJSON(r, &in)
-	ch, model, err := textChannelFor(p)
-	if err != nil {
-		httpErr(w, 400, err.Error())
-		return
-	}
-	if strings.TrimSpace(p.Idea) == "" {
-		httpErr(w, 400, "先在「设定」里写下故事创意")
-		return
-	}
-	user := fmt.Sprintf("剧名：%s\n故事创意：%s\n画面风格：%s\n画幅：%s\n单集时长：约 %d 秒\n目标镜头数：约 %d 个\n",
-		p.Title, p.Idea, orDefault(p.Style, "不限"), p.Aspect, p.EpisodeSec, p.ShotTarget)
-	if strings.TrimSpace(in.Note) != "" {
-		user += "\n额外要求：" + strings.TrimSpace(in.Note) + "\n"
-	}
-	if strings.TrimSpace(p.Script) != "" && strings.TrimSpace(in.Note) != "" {
-		user += "\n这是上一版剧本，请在它的基础上按额外要求修改：\n" + p.Script
-	}
-	tid, err := startTask(p.ID, "script", "project", p.ID, func(ctx context.Context) error {
-		text, err := callChat(ctx, ch, model, scriptSystem, user, 0.9)
-		if err != nil {
-			return err
-		}
-		_, err = db.Exec(`UPDATE projects SET script=? WHERE id=?`, text, p.ID)
-		return err
-	})
+	tid, err := scriptTask(p, e, in.Note)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -469,31 +252,31 @@ func orDefault(s, d string) string {
 
 // ---------- ③ 资产 ----------
 
-const extractSystem = `你是漫剧美术统筹。阅读剧本，列出需要提前做设定图的视觉资产：角色、场景、关键道具。
+const extractSystem = `你是漫剧美术统筹。阅读本集剧本，列出需要提前做设定图的视觉资产：角色、场景、关键道具。资产库在各集之间共享。
 要求：
-- 角色：每个有台词或反复出现的人物一项；description 写固定外貌（年龄感、发型发色、五官特征、体型、服装配色），不写剧情；
+- 角色：每个有台词或反复出现的人物一项；description 写固定外貌（年龄感、性别、发型发色、五官特征、体型、服装配色），不写剧情；人物小传里有的人物，外貌以小传为准；
 - 场景：每个独立地点一项；description 写空间结构、时代、光线、主色调；
 - 道具：只列剧情关键、会被特写的物件，没有就留空数组；
-- prompt：写给生图模型的中文提示词，单独描述这个资产本身，不要出现其他角色。
+- prompt：写给生图模型的中文提示词，单独描述这个资产本身，不要出现其他角色；
+- 已在资产库里的（见下方名单）不要重复列出。
 只输出 JSON：{"characters":[{"name":"","description":"","prompt":""}],"scenes":[...],"props":[...]}`
 
-func handleAssetsExtract(w http.ResponseWriter, r *http.Request) {
-	p, err := getProject(pathID(r))
-	if err != nil {
-		httpErr(w, 404, "作品不存在")
-		return
-	}
-	if strings.TrimSpace(p.Script) == "" {
-		httpErr(w, 400, "先写好剧本")
-		return
+func extractTask(p *Project, e *Episode) (int64, error) {
+	if strings.TrimSpace(e.Script) == "" {
+		return 0, errors.New("先写好剧本")
 	}
 	ch, model, err := textChannelFor(p)
 	if err != nil {
-		httpErr(w, 400, err.Error())
-		return
+		return 0, err
 	}
-	tid, err := startTask(p.ID, "extract", "project", p.ID, func(ctx context.Context) error {
-		text, err := callChat(ctx, ch, model, extractSystem, "画面风格："+orDefault(p.Style, "不限")+"\n\n剧本：\n"+p.Script, 0.4)
+	existing := listAssets(p.ID)
+	var names []string
+	for _, a := range existing {
+		names = append(names, a.Name)
+	}
+	user := "画面风格：" + orDefault(p.Style, "不限") + "\n\n人物小传：\n" + orDefault(p.Bios, "（无）") + "\n\n资产库已有：" + orDefault(strings.Join(names, "、"), "（空）") + "\n\n本集剧本：\n" + e.Script
+	return startTask(p.ID, e.ID, "extract", "project", p.ID, func(ctx context.Context) error {
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, extractSystem, user, 0.4)
 		if err != nil {
 			return err
 		}
@@ -506,7 +289,8 @@ func handleAssetsExtract(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		n := 0
-		for kind, list := range map[string][]assetDraft{"character": out.Characters, "scene": out.Scenes, "prop": out.Props} {
+		for _, kind := range []string{"character", "scene", "prop"} {
+			list := map[string][]assetDraft{"character": out.Characters, "scene": out.Scenes, "prop": out.Props}[kind]
 			for _, d := range list {
 				if strings.TrimSpace(d.Name) == "" {
 					continue
@@ -526,6 +310,15 @@ func handleAssetsExtract(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+}
+
+func handleAssetsExtract(w http.ResponseWriter, r *http.Request) {
+	p, e, err := epCtx(pathID(r))
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
+	tid, err := extractTask(p, e)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -551,7 +344,7 @@ func insertAsset(pid int64, kind string, d assetDraft) (int64, error) {
 		for rows.Next() {
 			var c string
 			var x int
-			if rows.Scan(&c) == nil {
+			if rows.Scan(&c) == nil && len(c) > 1 {
 				fmt.Sscanf(c[1:], "%d", &x)
 				if x > maxN {
 					maxN = x
@@ -599,7 +392,10 @@ func handleAssetUpdate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "资产不存在")
 		return
 	}
-	var in assetDraft
+	var in struct {
+		assetDraft
+		Voice *VoiceSpec `json:"voice"`
+	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -608,6 +404,9 @@ func handleAssetUpdate(w http.ResponseWriter, r *http.Request) {
 		in.Name = a.Name
 	}
 	_, _ = db.Exec(`UPDATE assets SET name=?,description=?,prompt=? WHERE id=?`, strings.TrimSpace(in.Name), strings.TrimSpace(in.Description), strings.TrimSpace(in.Prompt), a.ID)
+	if in.Voice != nil {
+		_, _ = db.Exec(`UPDATE assets SET voice=? WHERE id=?`, mustJSON(in.Voice), a.ID)
+	}
 	touchProject(a.ProjectID)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -632,7 +431,13 @@ var assetFrame = map[string]string{
 	"prop":      "道具设定图：单个物件居中，干净的浅灰纯色背景，无文字，细节清晰",
 }
 
-func assetPrompt(p *Project, a *Asset) string {
+// 定妆图模板：三视图 / 表情表（以选定的设定图为参考）
+var lookFrame = map[string]string{
+	"sheet": "角色定妆三视图：同一个角色的正面、侧面、背面三个全身站姿并排，比例一致，同一套服装与发型，干净的浅灰纯色背景，无文字，平光，细节清晰",
+	"expr":  "角色表情表：同一个角色的头肩特写 3×2 网格，分别是平静、微笑、大笑、愤怒、悲伤、惊讶六种表情，五官与发型保持一致，干净的浅灰纯色背景，无文字",
+}
+
+func assetPrompt(p *Project, a *Asset, tag string) string {
 	body := a.Prompt
 	if strings.TrimSpace(body) == "" {
 		body = a.Name + "，" + a.Description
@@ -641,14 +446,27 @@ func assetPrompt(p *Project, a *Asset) string {
 	if s := strings.TrimSpace(p.Style); s != "" {
 		parts = append(parts, "画面风格："+s)
 	}
-	parts = append(parts, assetFrame[a.Kind], body)
+	if f := lookFrame[tag]; f != "" {
+		parts = append(parts, f, body)
+		if a.PickedImageID > 0 {
+			parts = append(parts, "参考图1是这个角色的设定图，脸、发型、服装必须与参考图完全一致")
+		}
+	} else {
+		parts = append(parts, assetFrame[a.Kind], body)
+	}
 	if a.Kind == "character" && a.Description != "" && !strings.Contains(body, a.Description) {
 		parts = append(parts, "外貌："+a.Description)
 	}
 	return strings.Join(parts, "。")
 }
 
-func assetAspect(kind, projectAspect string) string {
+func assetAspect(kind, tag, projectAspect string) string {
+	switch tag {
+	case "sheet":
+		return "16:9"
+	case "expr":
+		return "3:2"
+	}
 	switch kind {
 	case "character":
 		return "3:4"
@@ -658,21 +476,38 @@ func assetAspect(kind, projectAspect string) string {
 	return projectAspect
 }
 
-func genAssetTask(p *Project, a *Asset, n int) (int64, error) {
+// genAssetTask tag 为空 = 设定图；sheet = 三视图；expr = 表情表
+func genAssetTask(p *Project, a *Asset, n int, tag string) (int64, error) {
 	ch, model, err := imageChannelFor(p)
 	if err != nil {
 		return 0, err
 	}
-	prompt := assetPrompt(p, a)
-	params := paramsFor(ch, assetAspect(a.Kind, p.Aspect), n)
-	return startTask(p.ID, "image", "asset", a.ID, func(ctx context.Context) error {
-		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, nil)
+	if tag != "" && a.Kind != "character" {
+		return 0, errors.New("只有角色可以做定妆图")
+	}
+	prompt := assetPrompt(p, a, tag)
+	params := paramsFor(ch, assetAspect(a.Kind, tag, p.Aspect), n)
+	var refs []refFile
+	if tag != "" && a.PickedImageID > 0 {
+		if im, err := getImage(a.PickedImageID); err == nil {
+			if rf, err := readImageRef(im); err == nil {
+				refs = append(refs, rf)
+			}
+		}
+	}
+	kind := "image"
+	if tag != "" {
+		kind = "image-" + tag
+	}
+	return startTask(p.ID, 0, kind, "asset", a.ID, func(ctx context.Context) error {
+		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
+		ledgerAdd(p.ID, 0, "image", len(imgs), 0, 0, 0, "")
 		if err != nil {
 			return err
 		}
 		var first int64
 		for _, data := range imgs {
-			im, err := storeImage(p.ID, "asset", a.ID, data, "gen", sent, ch.ID, model)
+			im, err := storeImageX(p.ID, 0, "asset", a.ID, tag, data, "gen", sent, ch.ID, model)
 			if err == nil && first == 0 {
 				first = im.ID
 			}
@@ -680,8 +515,8 @@ func genAssetTask(p *Project, a *Asset, n int) (int64, error) {
 		if first == 0 {
 			return errors.New("图片保存失败")
 		}
-		// 还没选过就自动选第一张
-		_, _ = db.Exec(`UPDATE assets SET picked_image_id=? WHERE id=? AND picked_image_id=0`, first, a.ID)
+		col := map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}[tag]
+		_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=? AND `+col+`=0`, first, a.ID)
 		return nil
 	})
 }
@@ -694,15 +529,47 @@ func handleAssetGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := getProject(a.ProjectID)
 	var in struct {
-		N int `json:"n"`
+		N   int    `json:"n"`
+		Tag string `json:"tag"`
 	}
 	_ = readJSON(r, &in)
-	tid, err := genAssetTask(p, a, clampInt(in.N, 1, 4))
+	if in.Tag != "sheet" && in.Tag != "expr" {
+		in.Tag = ""
+	}
+	tid, err := genAssetTask(p, a, clampInt(in.N, 1, 4), in.Tag)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
 	writeJSON(w, map[string]any{"task_id": tid})
+}
+
+// startMissingAssets 给还没有设定图的资产各生成一张；返回启动数量
+func startMissingAssets(p *Project) (int, error) {
+	n := 0
+	var lastErr error
+	for _, a := range listAssets(p.ID) {
+		if hasTag(a.Images, "") {
+			continue
+		}
+		if _, err := genAssetTask(p, a, 1, ""); err != nil {
+			if err.Error() != "正在进行中" {
+				lastErr = err
+			}
+			continue
+		}
+		n++
+	}
+	return n, lastErr
+}
+
+func hasTag(ims []*Image, tag string) bool {
+	for _, im := range ims {
+		if im.Tag == tag {
+			return true
+		}
+	}
+	return false
 }
 
 func handleAssetsGenerateAll(w http.ResponseWriter, r *http.Request) {
@@ -711,18 +578,7 @@ func handleAssetsGenerateAll(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "作品不存在")
 		return
 	}
-	n := 0
-	var lastErr error
-	for _, a := range listAssets(p.ID) {
-		if len(a.Images) > 0 {
-			continue
-		}
-		if _, err := genAssetTask(p, a, 1); err != nil {
-			lastErr = err
-			continue
-		}
-		n++
-	}
+	n, lastErr := startMissingAssets(p)
 	if n == 0 && lastErr != nil {
 		httpErr(w, 400, lastErr.Error())
 		return
@@ -736,17 +592,22 @@ func handleAssetUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "资产不存在")
 		return
 	}
+	tag := r.URL.Query().Get("tag")
+	if tag != "sheet" && tag != "expr" {
+		tag = ""
+	}
 	data, err := readUpload(r)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	im, err := storeImage(a.ProjectID, "asset", a.ID, data, "upload", "", 0, "")
+	im, err := storeImageX(a.ProjectID, 0, "asset", a.ID, tag, data, "upload", "", 0, "")
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	_, _ = db.Exec(`UPDATE assets SET picked_image_id=? WHERE id=?`, im.ID, a.ID)
+	col := map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}[tag]
+	_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=?`, im.ID, a.ID)
 	touchProject(a.ProjectID)
 	writeJSON(w, im)
 }
@@ -758,11 +619,12 @@ const storyboardSystem = `你是漫剧分镜师。把剧本拆成按顺序播放
 - 镜头总数接近目标数量，单个镜头 duration 取 5 到 10 的整数秒，总时长接近单集时长；
 - camera：景别 + 机位/运镜，如「近景 · 缓慢推近」「全景 · 固定」「过肩 · 轻微手持」；
 - action：画面里发生什么（人物动作、表情、环境变化），一个镜头只做一件事；
-- dialogue：这个镜头里的台词或旁白，格式「角色名：台词」，没有就留空；
+- dialogue：这个镜头里的台词或旁白，每句一行，格式「角色名：台词」，旁白写「旁白：……」，需要特别语气时在台词前用全角括号注明，如「林晚：（压低声音）别出声」；没有就留空；一个镜头的台词念完不要超过镜头时长；
 - assets：这个镜头出现的资产编号（只能用下面资产表里的编号，角色在前、场景其次、道具最后）；
+- continuous：和上一个镜头是同一场景里连续的动作时为 true（会用上一镜头的最后一帧衔接），否则 false；
 - keyframe_prompt：关键帧画面的中文生图提示词，写清构图、景别、人物位置与表情、光线，直接用资产名称指代角色和场景；
 - video_prompt：给图生视频模型的中文描述，只写从这张关键帧开始的动作、镜头运动、环境动态和声音（台词、音效、配乐氛围），不重复静态外观。
-只输出 JSON：{"shots":[{"duration":5,"camera":"","action":"","dialogue":"","assets":["C01","S01"],"keyframe_prompt":"","video_prompt":""}]}`
+只输出 JSON：{"shots":[{"duration":5,"camera":"","action":"","dialogue":"","assets":["C01","S01"],"continuous":false,"keyframe_prompt":"","video_prompt":""}]}`
 
 type shotDraft struct {
 	Duration       float64  `json:"duration"`
@@ -770,8 +632,11 @@ type shotDraft struct {
 	Action         string   `json:"action"`
 	Dialogue       string   `json:"dialogue"`
 	Assets         []string `json:"assets"`
+	Continuous     bool     `json:"continuous"`
 	KeyframePrompt string   `json:"keyframe_prompt"`
 	VideoPrompt    string   `json:"video_prompt"`
+	Chain          string   `json:"chain"`
+	SfxVolume      *float64 `json:"sfx_volume"`
 }
 
 func assetTable(assets []*Asset) string {
@@ -783,26 +648,19 @@ func assetTable(assets []*Asset) string {
 	return b.String()
 }
 
-func handleShotsSplit(w http.ResponseWriter, r *http.Request) {
-	p, err := getProject(pathID(r))
-	if err != nil {
-		httpErr(w, 404, "作品不存在")
-		return
-	}
-	if strings.TrimSpace(p.Script) == "" {
-		httpErr(w, 400, "先写好剧本")
-		return
+func splitTask(p *Project, e *Episode) (int64, error) {
+	if strings.TrimSpace(e.Script) == "" {
+		return 0, errors.New("先写好剧本")
 	}
 	ch, model, err := textChannelFor(p)
 	if err != nil {
-		httpErr(w, 400, err.Error())
-		return
+		return 0, err
 	}
 	assets := listAssets(p.ID)
 	user := fmt.Sprintf("目标镜头数：%d\n单集时长：约 %d 秒\n画幅：%s\n画面风格：%s\n\n资产表（编号｜类型｜名称｜外观）：\n%s\n剧本：\n%s",
-		p.ShotTarget, p.EpisodeSec, p.Aspect, orDefault(p.Style, "不限"), orDefault(assetTable(assets), "（暂无）\n"), p.Script)
-	tid, err := startTask(p.ID, "storyboard", "project", p.ID, func(ctx context.Context) error {
-		text, err := callChat(ctx, ch, model, storyboardSystem, user, 0.5)
+		p.ShotTarget, p.EpisodeSec, p.Aspect, orDefault(p.Style, "不限"), orDefault(assetTable(assets), "（暂无）\n"), e.Script)
+	return startTask(p.ID, e.ID, "storyboard", "episode", e.ID, func(ctx context.Context) error {
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, storyboardSystem, user, 0.5)
 		if err != nil {
 			return err
 		}
@@ -824,7 +682,10 @@ func handleShotsSplit(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		defer tx.Rollback()
-		if _, err := tx.Exec(`DELETE FROM shots WHERE project_id=?`, p.ID); err != nil {
+		if _, err := tx.Exec(`DELETE FROM shots WHERE episode_id=?`, e.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM lines WHERE episode_id=?`, e.ID); err != nil {
 			return err
 		}
 		for i, s := range out.Shots {
@@ -835,20 +696,31 @@ func handleShotsSplit(w http.ResponseWriter, r *http.Request) {
 					codes = append(codes, c)
 				}
 			}
-			d := math.Round(s.Duration)
-			if d < 5 {
-				d = 5
+			d := math.Max(5, math.Min(10, math.Round(s.Duration)))
+			chain := "off"
+			if s.Continuous && i > 0 {
+				chain = "ref"
 			}
-			if d > 10 {
-				d = 10
-			}
-			if _, err := tx.Exec(`INSERT INTO shots(project_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				p.ID, i+1, d, s.Camera, s.Action, s.Dialogue, mustJSON(codes), s.KeyframePrompt, s.VideoPrompt, now()); err != nil {
+			if _, err := tx.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+				p.ID, e.ID, i+1, d, s.Camera, s.Action, s.Dialogue, mustJSON(codes), s.KeyframePrompt, s.VideoPrompt, chain, now()); err != nil {
 				return err
 			}
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		syncLines(p, e)
+		return nil
 	})
+}
+
+func handleShotsSplit(w http.ResponseWriter, r *http.Request) {
+	p, e, err := epCtx(pathID(r))
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
+	tid, err := splitTask(p, e)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -857,12 +729,16 @@ func handleShotsSplit(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleShotCreate(w http.ResponseWriter, r *http.Request) {
-	pid := pathID(r)
+	_, e, err := epCtx(pathID(r))
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
 	var in struct {
 		After int64 `json:"after"`
 	}
 	_ = readJSON(r, &in)
-	shots := listShots(pid, false)
+	shots := listShots(e.ID, false)
 	sort := len(shots) + 1
 	if in.After > 0 {
 		for _, s := range shots {
@@ -870,24 +746,24 @@ func handleShotCreate(w http.ResponseWriter, r *http.Request) {
 				sort = s.Sort + 1
 			}
 		}
-		_, _ = db.Exec(`UPDATE shots SET sort=sort+1 WHERE project_id=? AND sort>=?`, pid, sort)
+		_, _ = db.Exec(`UPDATE shots SET sort=sort+1 WHERE episode_id=? AND sort>=?`, e.ID, sort)
 	}
-	res, err := db.Exec(`INSERT INTO shots(project_id,sort,duration,created_at) VALUES(?,?,5,?)`, pid, sort, now())
+	res, err := db.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,created_at) VALUES(?,?,?,5,?)`, e.ProjectID, e.ID, sort, now())
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}
 	id, _ := res.LastInsertId()
-	renumberShots(pid)
+	renumberShots(e.ID)
 	s, _ := getShot(id)
 	writeJSON(w, s)
 }
 
-func renumberShots(pid int64) {
-	for i, s := range listShots(pid, false) {
+func renumberShots(eid int64) {
+	for i, s := range listShots(eid, false) {
 		_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=?`, i+1, s.ID)
 	}
-	touchProject(pid)
+	touchEpisode(eid)
 }
 
 func handleShotUpdate(w http.ResponseWriter, r *http.Request) {
@@ -911,9 +787,21 @@ func handleShotUpdate(w http.ResponseWriter, r *http.Request) {
 	if d > 10 {
 		d = 10
 	}
-	_, _ = db.Exec(`UPDATE shots SET duration=?,camera=?,action=?,dialogue=?,asset_codes=?,keyframe_prompt=?,video_prompt=? WHERE id=?`,
-		d, in.Camera, in.Action, in.Dialogue, mustJSON(in.Assets), in.KeyframePrompt, in.VideoPrompt, s.ID)
-	touchProject(s.ProjectID)
+	chain := in.Chain
+	if chain != "ref" && chain != "first" {
+		chain = "off"
+	}
+	_, _ = db.Exec(`UPDATE shots SET duration=?,camera=?,action=?,dialogue=?,asset_codes=?,keyframe_prompt=?,video_prompt=?,chain=? WHERE id=?`,
+		d, in.Camera, in.Action, in.Dialogue, mustJSON(in.Assets), in.KeyframePrompt, in.VideoPrompt, chain, s.ID)
+	if in.SfxVolume != nil {
+		_, _ = db.Exec(`UPDATE shots SET sfx_volume=? WHERE id=?`, clampF(*in.SfxVolume, 0, 2), s.ID)
+	}
+	if in.Dialogue != s.Dialogue {
+		if p, e, err := epCtx(s.EpisodeID); err == nil {
+			syncLines(p, e)
+		}
+	}
+	touchEpisode(s.EpisodeID)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -927,8 +815,9 @@ func handleShotDelete(w http.ResponseWriter, r *http.Request) {
 		deleteImageRow(im)
 	}
 	_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE shot_id=? AND status='queued'`, now(), s.ID)
+	_, _ = db.Exec(`DELETE FROM lines WHERE shot_id=?`, s.ID)
 	_, _ = db.Exec(`DELETE FROM shots WHERE id=?`, s.ID)
-	renumberShots(s.ProjectID)
+	renumberShots(s.EpisodeID)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -939,57 +828,137 @@ func handleShotOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, id := range ids {
-		_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=? AND project_id=?`, i+1, id, pathID(r))
+		_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=? AND episode_id=?`, i+1, id, pathID(r))
 	}
-	touchProject(pathID(r))
+	touchEpisode(pathID(r))
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 // ---------- ⑤ 关键帧 ----------
 
-// keyframePlan 按渠道参考图上限挑选参考图，并在提示词里说明每张参考图是谁
-func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []string) {
+type refPick struct {
+	Code  string `json:"code"`
+	Name  string `json:"name"`
+	Kind  string `json:"kind"`
+	Image string `json:"image"`
+	Used  bool   `json:"used"`
+	Note  string `json:"note"`
+}
+
+// planRefs 按相关度排序参考图：本镜头里最重要的角色（台词多、全剧出场多）优先用定妆三视图，
+// 然后其余角色、场景、道具；上一镜头的最后一帧（衔接时）排在主角之后。超出渠道上限的改用文字描述。
+func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 	assets := listAssets(p.ID)
 	byCode := map[string]*Asset{}
 	for _, a := range assets {
 		byCode[a.Code] = a
 	}
-	limit := 0
-	if ch.Caps.Refs.Mode != "off" {
-		limit = ch.Caps.Refs.Max
-		if limit == 0 {
-			limit = 4
+	type cand struct {
+		a     *Asset
+		score float64
+	}
+	var chars, others []cand
+	for i, c := range s.Assets {
+		a := byCode[c]
+		if a == nil || a.PickedImageID == 0 {
+			continue
+		}
+		sc := float64(a.Appear) - float64(i)*0.01
+		if a.Kind == "character" {
+			if strings.Contains(s.Dialogue, a.Name) {
+				sc += 100
+			}
+			if strings.Contains(s.Action, a.Name) || strings.Contains(s.KeyframePrompt, a.Name) {
+				sc += 10
+			}
+			chars = append(chars, cand{a, sc})
+		} else {
+			if a.Kind == "scene" {
+				sc += 1000
+			}
+			others = append(others, cand{a, sc})
 		}
 	}
-	// 角色 → 场景 → 道具
-	ordered := []*Asset{}
-	for _, kind := range []string{"character", "scene", "prop"} {
-		for _, c := range s.Assets {
-			if a := byCode[c]; a != nil && a.Kind == kind && a.PickedImageID > 0 {
-				ordered = append(ordered, a)
+	sort.SliceStable(chars, func(i, j int) bool { return chars[i].score > chars[j].score })
+	sort.SliceStable(others, func(i, j int) bool { return others[i].score > others[j].score })
+	kinds := map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}
+	var picks []refPick
+	var ims []*Image
+	add := func(code, name, kind string, imID int64, note string) {
+		im, err := getImage(imID)
+		if err != nil {
+			return
+		}
+		used := len(ims) < limit
+		picks = append(picks, refPick{Code: code, Name: name, Kind: kind, Image: im.URL, Used: used, Note: note})
+		if used {
+			ims = append(ims, im)
+		}
+	}
+	for i, c := range chars {
+		img := c.a.PickedImageID
+		note := "设定图"
+		if c.a.SheetImageID > 0 && (i == 0 || limit >= len(chars)+len(others)+1) {
+			img, note = c.a.SheetImageID, "定妆三视图"
+		}
+		add(c.a.Code, c.a.Name, kinds[c.a.Kind], img, note)
+		if i == 0 && s.Chain == "ref" {
+			if lf := prevLastFrame(s); lf != nil {
+				add("上一镜", "上一镜头最后一帧", "衔接", lf.ID, "衔接")
 			}
 		}
 	}
-	var refs []refFile
-	var used []string
-	var notes []string
-	kinds := map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}
-	for _, a := range ordered {
-		if len(refs) >= limit {
-			break
+	if len(chars) == 0 && s.Chain == "ref" {
+		if lf := prevLastFrame(s); lf != nil {
+			add("上一镜", "上一镜头最后一帧", "衔接", lf.ID, "衔接")
 		}
-		im, err := getImage(a.PickedImageID)
-		if err != nil {
+	}
+	for _, c := range others {
+		add(c.a.Code, c.a.Name, kinds[c.a.Kind], c.a.PickedImageID, "设定图")
+	}
+	return picks, ims
+}
+
+func refLimit(ch *Channel) int {
+	if ch == nil || ch.Caps.Refs.Mode == "off" {
+		return 0
+	}
+	if ch.Caps.Refs.Max == 0 {
+		return 4
+	}
+	return ch.Caps.Refs.Max
+}
+
+// keyframePlan 按渠道参考图上限挑选参考图，并在提示词里说明每张参考图是谁
+func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPick) {
+	assets := listAssets(p.ID)
+	byCode := map[string]*Asset{}
+	for _, a := range assets {
+		byCode[a.Code] = a
+	}
+	picks, ims := planRefs(p, s, refLimit(ch))
+	var refs []refFile
+	var notes []string
+	used := map[string]bool{}
+	k := 0
+	for _, pk := range picks {
+		if !pk.Used {
 			continue
 		}
-		rf, err := readImageRef(im)
+		rf, err := readImageRef(ims[k])
+		k++
 		if err != nil {
 			continue
 		}
 		refs = append(refs, rf)
-		used = append(used, a.Code)
-		notes = append(notes, fmt.Sprintf("参考图%d是%s「%s」", len(refs), kinds[a.Kind], a.Name))
+		used[pk.Code] = true
+		if pk.Kind == "衔接" {
+			notes = append(notes, fmt.Sprintf("参考图%d是上一个镜头的最后一帧，人物位置、光线和环境要与它连贯", len(refs)))
+		} else {
+			notes = append(notes, fmt.Sprintf("参考图%d是%s「%s」的%s", len(refs), pk.Kind, pk.Name, pk.Note))
+		}
 	}
+	kinds := map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}
 	parts := []string{}
 	if st := strings.TrimSpace(p.Style); st != "" {
 		parts = append(parts, "画面风格："+st)
@@ -999,10 +968,9 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []string
 		body = s.Camera + "，" + s.Action
 	}
 	parts = append(parts, body)
-	// 没进参考图的资产用文字描述补上
 	for _, c := range s.Assets {
 		a := byCode[c]
-		if a == nil || contains(used, c) || a.Description == "" {
+		if a == nil || used[c] || a.Description == "" {
 			continue
 		}
 		parts = append(parts, fmt.Sprintf("%s「%s」：%s", kinds[a.Kind], a.Name, a.Description))
@@ -1011,7 +979,7 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []string
 		parts = append(parts, strings.Join(notes, "，")+"；保持角色的脸、发型和服装与参考图一致，场景沿用参考图的空间与色调")
 	}
 	parts = append(parts, "电影感单帧画面，无字幕，无文字")
-	return strings.Join(parts, "。"), refs, used
+	return strings.Join(parts, "。"), refs, picks
 }
 
 func genKeyframeTask(p *Project, s *Shot, n int) (int64, error) {
@@ -1019,16 +987,20 @@ func genKeyframeTask(p *Project, s *Shot, n int) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if s.Chain == "ref" {
+		_, _ = ensurePrevLastFrame(s)
+	}
 	prompt, refs, _ := keyframePlan(p, s, ch)
 	params := paramsFor(ch, p.Aspect, n)
-	return startTask(p.ID, "image", "shot", s.ID, func(ctx context.Context) error {
+	return startTask(p.ID, s.EpisodeID, "image", "shot", s.ID, func(ctx context.Context) error {
 		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
+		ledgerAdd(p.ID, s.EpisodeID, "image", len(imgs), 0, 0, 0, "")
 		if err != nil {
 			return err
 		}
 		var first int64
 		for _, data := range imgs {
-			im, err := storeImage(p.ID, "shot", s.ID, data, "gen", sent, ch.ID, model)
+			im, err := storeImageX(p.ID, s.EpisodeID, "shot", s.ID, "", data, "gen", sent, ch.ID, model)
 			if err == nil && first == 0 {
 				first = im.ID
 			}
@@ -1060,24 +1032,46 @@ func handleKeyframeGenerate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"task_id": tid})
 }
 
-func handleKeyframesGenerateAll(w http.ResponseWriter, r *http.Request) {
-	p, err := getProject(pathID(r))
+func handleShotRefs(w http.ResponseWriter, r *http.Request) {
+	s, err := getShot(pathID(r))
 	if err != nil {
-		httpErr(w, 404, "作品不存在")
+		httpErr(w, 404, "镜头不存在")
 		return
 	}
+	p, _ := getProject(s.ProjectID)
+	ch, _, _ := imageChannelFor(p)
+	picks, _ := planRefs(p, s, refLimit(ch))
+	if picks == nil {
+		picks = []refPick{}
+	}
+	writeJSON(w, map[string]any{"refs": picks, "limit": refLimit(ch)})
+}
+
+func startMissingKeyframes(p *Project, e *Episode) (int, error) {
 	n := 0
 	var lastErr error
-	for _, s := range listShots(p.ID, true) {
+	for _, s := range listShots(e.ID, true) {
 		if len(s.Images) > 0 {
 			continue
 		}
 		if _, err := genKeyframeTask(p, s, 1); err != nil {
-			lastErr = err
+			if err.Error() != "正在进行中" {
+				lastErr = err
+			}
 			continue
 		}
 		n++
 	}
+	return n, lastErr
+}
+
+func handleKeyframesGenerateAll(w http.ResponseWriter, r *http.Request) {
+	p, e, err := epCtx(pathID(r))
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
+	n, lastErr := startMissingKeyframes(p, e)
 	if n == 0 && lastErr != nil {
 		httpErr(w, 400, lastErr.Error())
 		return
@@ -1096,14 +1090,12 @@ func handleKeyframeUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	im, err := storeImage(s.ProjectID, "shot", s.ID, data, "upload", "", 0, "")
+	im, err := storeImageX(s.ProjectID, s.EpisodeID, "shot", s.ID, "", data, "upload", "", 0, "")
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
 	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im.ID, s.ID)
-	touchProject(s.ProjectID)
+	touchEpisode(s.EpisodeID)
 	writeJSON(w, im)
 }
-
-var _ = sql.ErrNoRows

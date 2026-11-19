@@ -1,41 +1,41 @@
 import { useState } from 'react'
-import { ArrowDown, ArrowRight, ArrowUp, Pencil, Plus, Trash2, Wand2 } from 'lucide-react'
+import { ArrowDown, ArrowRight, ArrowUp, Pencil, Plus, Trash2, Wand2, Link2 } from 'lucide-react'
 import { api, type Shot } from '../../api'
 import { useProject, StepHead, Cost } from '../Project'
-import { Empty, Modal, Spinner } from '../../components/ui'
-import { fmtSec } from '../../labels'
+import { Empty, Modal, Segmented, Spinner } from '../../components/ui'
+import { chainNames, fmtSec } from '../../labels'
 
 export default function Storyboard() {
   const { data, task, run, goStep } = useProject()
-  const p = data.project
+  const p = data.project, e = data.episode
   const [edit, setEdit] = useState<Shot | null>(null)
-  const splitting = task('storyboard', 'project', p.id)
+  const splitting = task('storyboard', 'episode', e.id)
   const total = data.shots.reduce((s, x) => s + x.duration, 0)
   const split = () => {
     if (data.shots.length && !confirm('重新拆分会替换现有分镜（已生成的关键帧和视频不再关联），继续？')) return
-    run(() => api(`/api/projects/${p.id}/shots/split`, { method: 'POST' }))
+    run(() => api(`/api/episodes/${e.id}/shots/split`, { method: 'POST' }))
   }
   const move = (i: number, d: number) => {
     const ids = data.shots.map(s => s.id)
     const j = i + d
     if (j < 0 || j >= ids.length) return
     ;[ids[i], ids[j]] = [ids[j], ids[i]]
-    run(() => api(`/api/projects/${p.id}/shots/order`, { body: ids }))
+    run(() => api(`/api/episodes/${e.id}/shots/order`, { body: ids }))
   }
   const byCode = Object.fromEntries(data.assets.map(a => [a.code, a]))
   return (
     <section className="stepview">
       <StepHead title="分镜" note={data.shots.length ? `${data.shots.length} 镜 · ${fmtSec(total)}` : undefined}>
-        <button className="btn btn-secondary" disabled={!!splitting || !p.script.trim()} onClick={split}>
+        <button className="btn btn-secondary" disabled={!!splitting || !e.script.trim()} onClick={split}>
           {splitting ? <Spinner /> : <Wand2 size={16} />}{data.shots.length ? '重新拆分' : 'AI 拆分镜'}<Cost>1 次对话</Cost>
         </button>
-        <button className="btn btn-secondary" onClick={() => run(() => api(`/api/projects/${p.id}/shots`, { body: {} }))}><Plus size={16} />添加镜头</button>
+        <button className="btn btn-secondary" onClick={() => run(() => api(`/api/episodes/${e.id}/shots`, { body: {} }))}><Plus size={16} />添加镜头</button>
         <button className="btn btn-primary" disabled={!data.shots.length} onClick={() => goStep(5)}>下一步：关键帧<ArrowRight size={16} /></button>
       </StepHead>
       {data.shots.length === 0 && (
         <div className="card card-empty">
           {splitting ? <div className="loading"><Spinner size={18} /><span>正在拆分镜头</span></div> :
-            <Empty art="book" title="还没有分镜" text="把剧本拆成 5–10 秒一个的镜头，每个镜头标好要用到的资产。" />}
+            <Empty art="book" title="还没有分镜" />}
         </div>
       )}
       <div className={`shots ${splitting ? 'is-dim' : ''}`}>
@@ -44,6 +44,7 @@ export default function Storyboard() {
             <div className="shot-no">
               <b>{s.code}</b>
               <span>{s.duration} 秒</span>
+              {s.chain !== 'off' && i > 0 && <span className="chain-tag" title={chainNames[s.chain]}><Link2 size={11} />{s.chain === 'first' ? '首尾帧' : '衔接'}</span>}
             </div>
             <div className="shot-body">
               <div className="shot-cam">{s.camera || <span className="muted">未写镜头语言</span>}</div>
@@ -91,6 +92,10 @@ export function ShotEditor({ shot, onClose }: { shot: Shot; onClose: () => void 
           {data.assets.map(a => <button key={a.code} type="button" className={`chip ${s.assets.includes(a.code) ? 'is-on' : ''}`} onClick={() => toggle(a.code)}><em>{a.code}</em>{a.name}</button>)}
           {data.assets.length === 0 && <span className="muted sm-text">还没有资产</span>}
         </div>
+      </div>
+      <div className="field"><span className="field-label">与上一镜头衔接</span>
+        <Segmented value={s.chain} onChange={v => setS({ ...s, chain: v as any })} disabled={shot.code === '01'}
+          options={[{ value: 'off', label: '不衔接' }, { value: 'ref', label: '最后一帧作参考' }, { value: 'first', label: '最后一帧作首帧' }]} />
       </div>
       <label className="field"><span className="field-label">关键帧提示词</span><textarea className="input" rows={3} value={s.keyframe_prompt} onChange={e => setS({ ...s, keyframe_prompt: e.target.value })} /></label>
       <label className="field"><span className="field-label">视频描述</span><textarea className="input" rows={3} value={s.video_prompt} onChange={e => setS({ ...s, video_prompt: e.target.value })} placeholder="从关键帧开始的动作、运镜和声音" /></label>

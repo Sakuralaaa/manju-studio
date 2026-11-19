@@ -276,6 +276,7 @@ func handleColabClientUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = setSetting("colab_client", mustJSON(c))
 	delSetting("colab_refresh_token")
+	delSetting("colab_scopes")
 	tokMu.Lock()
 	tokAccess = ""
 	tokMu.Unlock()
@@ -304,7 +305,7 @@ func handleColabAuthStart(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	q := url.Values{
-		"client_id": {c.ClientID}, "redirect_uri": {oauthRedirct}, "response_type": {"code"}, "scope": {colabScope},
+		"client_id": {c.ClientID}, "redirect_uri": {oauthRedirct}, "response_type": {"code"}, "scope": {authScopes()},
 		"access_type": {"offline"}, "prompt": {"consent"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}, "state": {state},
 	}
 	writeJSON(w, map[string]any{"url": googleAuth + "?" + q.Encode()})
@@ -354,6 +355,7 @@ func handleColabAuthFinish(w http.ResponseWriter, r *http.Request) {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
+		Scope        string `json:"scope"`
 		Error        string `json:"error"`
 		Desc         string `json:"error_description"`
 	}
@@ -373,6 +375,7 @@ func handleColabAuthFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = setSetting("colab_refresh_token", out.RefreshToken)
+	_ = setSetting("colab_scopes", orDefault(out.Scope, colabScope))
 	delSetting("colab_pkce")
 	tokMu.Lock()
 	tokAccess, tokExp = out.AccessToken, time.Now().Add(time.Duration(out.ExpiresIn)*time.Second)
@@ -425,4 +428,12 @@ func handleColabRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, info)
+}
+
+// authScopes 开启云端硬盘权重缓存时多申请 drive.file（只能访问本应用自己创建的文件）
+func authScopes() string {
+	if loadColabCfg().DriveCache {
+		return colabScope + " " + driveScope
+	}
+	return colabScope
 }

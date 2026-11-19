@@ -5,6 +5,7 @@ import { StoreProvider, useStore, type Page } from './store'
 import { Spinner, useInterval } from './components/ui'
 import Projects from './pages/Projects'
 import ProjectPage from './pages/Project'
+import Series from './pages/Series'
 import Compute from './pages/Compute'
 import Channels from './pages/Channels'
 import ApiPage from './pages/ApiPage'
@@ -66,7 +67,7 @@ function Shell() {
   }, [])
   const isDark = document.documentElement.dataset.theme === 'dark'
   const logout = async () => { await api('/api/logout', { method: 'POST' }); location.reload() }
-  const active: Page = route.page === 'project' ? 'projects' : route.page
+  const active: Page = route.page === 'project' || route.page === 'series' ? 'projects' : route.page
   return (
     <div className={`shell route-${route.page}`}>
       <header className={`topbar ${scrolled ? 'is-scrolled' : ''}`}>
@@ -84,7 +85,8 @@ function Shell() {
       </header>
       <main className="main">
         {route.page === 'projects' && <Projects />}
-        {route.page === 'project' && route.id && <ProjectPage key={route.id} id={route.id} />}
+        {route.page === 'series' && route.id && <Series key={route.id} id={route.id} />}
+        {route.page === 'project' && route.ep && <ProjectPage key={route.ep} id={route.ep} />}
         {route.page === 'compute' && <Compute />}
         {route.page === 'channels' && <Channels />}
         {route.page === 'api' && <ApiPage />}

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, ExternalLink, FileJson, KeyRound, Play, Power, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react'
-import { api, type ColabCfg, type ColabState, type Video, type WorkflowItem } from '../api'
+import { api, type ColabCfg, type ColabState, type LedgerRow, type LedgerTotal, type Video, type WorkflowItem } from '../api'
 import { useStore } from '../store'
-import { Empty, Segmented, Select, Spinner, copyText, useInterval } from '../components/ui'
+import { Empty, Segmented, Select, Spinner, copyText, useInterval, useMedia } from '../components/ui'
 import { PageHead } from './Projects'
-import { accName, fmtClock, fmtCU, fmtTime, phaseLabels } from '../labels'
+import { accName, fmtBytes, fmtClock, fmtCU, fmtTime, phaseLabels } from '../labels'
 import { useColab, estimate } from './project/Videos'
 
-type Tab = 'overview' | 'queue' | 'schedule' | 'model'
-const tabs = [{ value: 'overview', label: '概览' }, { value: 'queue', label: '队列' }, { value: 'schedule', label: '调度' }, { value: 'model', label: '视频模型' }]
+type Tab = 'overview' | 'queue' | 'ledger' | 'schedule' | 'model'
+const tabs = [{ value: 'overview', label: '概览' }, { value: 'queue', label: '队列' }, { value: 'ledger', label: '账本' }, { value: 'schedule', label: '调度' }, { value: 'model', label: '视频模型' }]
 const shapeLabel: Record<string, string> = { SHAPE_STANDARD: '标准', SHAPE_HIGHMEM: '高内存' }
 const variantLabel: Record<string, string> = { VARIANT_CPU: 'CPU', VARIANT_GPU: 'GPU', VARIANT_TPU: 'TPU' }
 
@@ -22,7 +22,7 @@ export default function Compute() {
         <Segmented block={false} value={tab} onChange={v => pick(v as Tab)} options={tabs} />
       </PageHead>
       {!st ? <div className="loading"><Spinner size={20} /></div> :
-        tab === 'overview' ? <Overview st={st} reload={reload} /> : tab === 'queue' ? <Queue st={st} /> : tab === 'schedule' ? <Schedule st={st} reload={reload} /> : <Models />}
+        tab === 'overview' ? <Overview st={st} reload={reload} /> : tab === 'queue' ? <Queue st={st} /> : tab === 'ledger' ? <Ledger /> : tab === 'schedule' ? <Schedule st={st} reload={reload} /> : <Models />}
     </div>
   )
 }
@@ -63,6 +63,9 @@ function Account({ st, reload }: { st: ColabState; reload: () => void }) {
         <span className="grow" />
         {st.authorized && st.info && <span className="pill-tag is-ok"><Check size={12} strokeWidth={3} />{st.info.tier_label}</span>}
       </div>
+      {st.authorized && !authUrl && st.drive?.enabled && !st.drive.scope_ok && (
+        <div className="inline-warn"><span>权重缓存需要云端硬盘权限，重新授权一次</span><button className="btn btn-secondary btn-sm" disabled={busy} onClick={start}><KeyRound size={14} />重新授权</button></div>
+      )}
       {st.authorized && !authUrl ? (
         <div className="kv-rows">
           <div className="kv-row"><span>订阅</span><b>{st.info?.tier_label || '—'}</b></div>
@@ -93,7 +96,7 @@ function Account({ st, reload }: { st: ColabState; reload: () => void }) {
           <li className={step === 2 ? 'is-on' : step > 2 ? 'is-done' : ''}>
             <span className="auth-no">2</span>
             <div className="auth-body">
-              <b>在 Google 授权页同意访问 Colab</b>
+              <b>{st.drive?.enabled ? '在 Google 授权页同意访问 Colab 和云端硬盘' : '在 Google 授权页同意访问 Colab'}</b>
               <span className="muted">同意后浏览器会跳到一个打不开的 localhost 地址，复制整条地址</span>
               <div className="row-actions">
                 <button className="btn btn-secondary btn-sm" disabled={busy || !st.client} onClick={start}><ExternalLink size={14} />打开授权页</button>
@@ -302,6 +305,8 @@ function Schedule({ st, reload }: { st: ColabState; reload: () => void }) {
           {num('boot_min', '开机与准备环境', '分钟', 0.5)}
           {num('clip_min', '每段（标准）', '分钟', 0.5)}
           {num('clip_min_turbo', '每段（Turbo）', '分钟', 0.5)}
+          {num('upscale_min', '每段放大', '分钟', 0.5)}
+          {num('interp_min', '每段补帧', '分钟', 0.5)}
         </div>
         <div className="rates">
           {Object.keys(c.rates).sort().map(k => (
@@ -309,12 +314,74 @@ function Schedule({ st, reload }: { st: ColabState; reload: () => void }) {
           ))}
         </div>
       </section>
+      <section className="card gcard">
+        <div className="gcard-head"><h3>模型权重</h3>
+          {st.drive?.files > 0 && <span className="muted">已缓存 {st.drive.files} 个文件 · {fmtBytes(st.drive.bytes)}</span>}
+        </div>
+        <div className="form-grid">
+          <label className="field"><span className="field-label">下载镜像</span>
+            <input className="input" value={c.mirror || ''} onChange={e => setC({ ...c, mirror: e.target.value })} placeholder="https://huggingface.co" />
+          </label>
+          <div className="field"><span className="field-label">云端硬盘缓存</span>
+            <Segmented value={c.drive_cache ? 'on' : 'off'} onChange={v => setC({ ...c, drive_cache: v === 'on' })} options={[{ value: 'off', label: '关闭' }, { value: 'on', label: '开启' }]} />
+          </div>
+        </div>
+        {c.drive_cache && st.drive && !st.drive.scope_ok && st.authorized && <div className="inline-warn"><span>需要在概览里重新授权，添加云端硬盘权限</span></div>}
+        {st.drive?.files > 0 && <div className="row-actions"><span className="grow" /><button className="btn btn-ghost btn-sm" onClick={() => confirm('清空缓存记录？云端硬盘里的文件不会删除。') && api('/api/colab/drive/reset', { method: 'POST' }).then(reload)}>清空缓存记录</button></div>}
+      </section>
       <div className="row-actions"><span className="grow" /><button className="btn btn-primary" onClick={save}><Check size={16} />保存</button></div>
     </div>
   )
 }
 
+function Ledger() {
+  const [d, setD] = useState<{ rows: LedgerRow[]; total: LedgerTotal; sessions: any[] } | null>(null)
+  useEffect(() => { api<any>('/api/ledger').then(setD) }, [])
+  if (!d) return <div className="loading"><Spinner /></div>
+  const t = d.total
+  const diff = t.est_cu > 0 ? (t.cu - t.est_cu) / t.est_cu : 0
+  return (
+    <div className="stack">
+      <div className="rt-stats ledger-stats">
+        <div><b>{fmtCU(t.cu)}</b><span>实际 CU</span></div>
+        <div><b>{fmtCU(t.est_cu)}</b><span>估算 CU{t.est_cu > 0 ? ` · ${diff >= 0 ? '+' : ''}${Math.round(diff * 100)}%` : ''}</span></div>
+        <div><b>{Math.round(t.gpu_min)}</b><span>视频 GPU 分钟</span></div>
+        <div><b>{fmtCU(t.overhead_cu)}</b><span>开机与空闲 CU</span></div>
+      </div>
+      <section className="card gcard">
+        <div className="gcard-head"><h3>按集</h3></div>
+        {d.rows.length === 0 ? <Empty art="stack" title="还没有记录" /> : (
+          <div className="table ltable">
+            <div className="tr th"><span>作品</span><span>集</span><span>视频</span><span>GPU 分钟</span><span>实际 CU</span><span>估算 CU</span><span>生图</span><span>配音</span><span>对话</span></div>
+            {d.rows.map(r => (
+              <div key={`${r.project_id}-${r.episode_id}`} className="tr">
+                <span title={r.title}>{r.title}</span><span title={r.episode}>{r.episode || '—'}</span><span>{r.videos}</span><span>{r.gpu_min.toFixed(1)}</span>
+                <span>{fmtCU(r.cu)}</span><span className="muted">{fmtCU(r.est_cu)}</span><span>{r.images}</span><span>{r.tts}</span><span>{r.llm}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+      <section className="card gcard">
+        <div className="gcard-head"><h3>会话</h3></div>
+        {d.sessions.length === 0 ? <Empty art="stack" title="还没有会话" /> : (
+          <div className="table stable">
+            <div className="tr th"><span>开始</span><span>规格</span><span>总时长</span><span>开机</span><span>出视频</span><span>CU</span></div>
+            {d.sessions.map(s => (
+              <div key={s.id} className="tr">
+                <span>{fmtTime(s.started_at)}</span><span>{s.accelerator}</span><span>{Math.round(s.minutes)} 分</span><span>{s.boot_min ? `${s.boot_min.toFixed(1)} 分` : '—'}</span>
+                <span>{s.video_min ? `${s.video_min.toFixed(1)} 分` : '—'}</span><span>{fmtCU(s.cu)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
 function Models() {
+  const narrow = useMedia('(max-width: 720px)')
   const { toast } = useStore()
   const [items, setItems] = useState<WorkflowItem[] | null>(null)
   const [key, setKey] = useState('standard')
@@ -330,7 +397,8 @@ function Models() {
   return (
     <section className="card gcard">
       <div className="gcard-head">
-        <Segmented block={false} size="sm" value={key} onChange={pick} options={items.map(i => ({ value: i.key, label: i.name }))} />
+        {narrow ? <Select size="sm" className="wf-sel" value={key} onChange={pick} options={items.map(i => ({ value: i.key, label: i.name }))} /> :
+          <Segmented block={false} size="sm" value={key} onChange={pick} options={items.map(i => ({ value: i.key, label: i.name }))} />}
         <span className="grow" />
         {cur.custom && <span className="pill-tag">已修改</span>}
       </div>
