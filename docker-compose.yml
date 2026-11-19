@@ -1,0 +1,12 @@
+services:
+  manju-studio:
+    image: ghcr.io/sakuralaaa/manju-studio:latest
+    container_name: manju-studio
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMIN_PASSWORD: "请改成你的密码"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data

@@ -1,0 +1,98 @@
+import { useEffect, useState } from 'react'
+import { Copy, KeyRound, Plus, Trash2 } from 'lucide-react'
+import { api, type ApiKey } from '../api'
+import { useStore } from '../store'
+import { Empty, Modal, Spinner, copyText } from '../components/ui'
+import { PageHead } from './Projects'
+import { fmtTime } from '../labels'
+
+const tools: [string, string][] = [
+  ['colab_status', '运行时状态、排队数、已用 CU'],
+  ['colab_specs', '可用运行时规格'],
+  ['colab_start', '开机（视频 / 仅运行代码）'],
+  ['colab_stop', '关机'],
+  ['colab_run_python', '在运行时上执行 Python'],
+  ['video_submit', '提交图生视频任务'],
+  ['video_status', '查询视频任务'],
+  ['list_projects', '作品列表与缺失步骤'],
+  ['list_shots', '作品分镜'],
+  ['image_generate', '调用生图渠道'],
+]
+
+const rest: [string, string, string][] = [
+  ['GET', '/v1/colab', '运行时状态'],
+  ['GET', '/v1/colab/specs', '可用规格'],
+  ['POST', '/v1/colab/start', '开机 {accelerator, purpose}'],
+  ['POST', '/v1/colab/stop', '关机'],
+  ['POST', '/v1/colab/exec', '执行代码 {code, timeout_sec}'],
+  ['POST', '/v1/videos', '提交视频 {prompt, image_url | image_base64 | image_id | shot_id, seconds, turbo}'],
+  ['GET', '/v1/videos/{id}', '视频状态'],
+  ['GET', '/v1/videos/{id}/file', '下载视频'],
+  ['GET', '/v1/projects', '作品列表'],
+  ['GET', '/v1/projects/{id}/shots', '分镜'],
+  ['POST', '/v1/images', '生图 {prompt, channel_id, aspect, n}'],
+  ['GET', '/v1/images/{id}/file', '下载图片'],
+]
+
+export default function ApiPage() {
+  const { toast } = useStore()
+  const [keys, setKeys] = useState<ApiKey[] | null>(null)
+  const [name, setName] = useState('')
+  const [created, setCreated] = useState<string | null>(null)
+  const [adding, setAdding] = useState(false)
+  const load = () => api<ApiKey[]>('/api/keys').then(setKeys).catch(() => setKeys([]))
+  useEffect(() => { load() }, [])
+  const origin = location.origin
+  const create = async () => {
+    try { const r = await api<{ key: string }>('/api/keys', { body: { name } }); setCreated(r.key); setName(''); setAdding(false); load() } catch (e: any) { toast(e.message, 'err') }
+  }
+  const copy = async (t: string) => { await copyText(t); toast('已复制') }
+  const mcpConf = JSON.stringify({ mcpServers: { manju: { type: 'http', url: `${origin}/mcp`, headers: { Authorization: 'Bearer <密钥>' } } } }, null, 2)
+  return (
+    <div className="page page-narrow">
+      <PageHead title="接口" />
+      <div className="stack">
+        <section className="card gcard">
+          <div className="gcard-head"><h3>密钥</h3><span className="grow" /><button className="btn btn-primary btn-sm" onClick={() => setAdding(true)}><Plus size={14} />新建密钥</button></div>
+          {!keys ? <div className="loading"><Spinner /></div> : keys.length === 0 ? <Empty art="plug" title="还没有密钥" /> : (
+            <div className="klist">
+              {keys.map(k => (
+                <div key={k.id} className="krow">
+                  <span className="kicon"><KeyRound size={16} /></span>
+                  <div className="kmain"><b>{k.name}</b><span className="muted" title={`mj-••••${k.tail}`}>mj-••••{k.tail} · 创建于 {fmtTime(k.created_at)}{k.last_used_at ? ` · 最近使用 ${fmtTime(k.last_used_at)}` : ' · 未使用'}</span></div>
+                  <button className="icon-btn sm is-danger" onClick={() => confirm(`吊销「${k.name}」？使用它的智能体会立即失去访问。`) && api(`/api/keys/${k.id}`, { method: 'DELETE' }).then(load)} aria-label="吊销" title="吊销"><Trash2 size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section className="card gcard">
+          <div className="gcard-head"><h3>MCP</h3><span className="mini-tag">可流式 HTTP</span></div>
+          <div className="endpoint"><code>{origin}/mcp</code><button className="icon-btn sm" onClick={() => copy(`${origin}/mcp`)} aria-label="复制" title="复制"><Copy size={14} /></button></div>
+          <pre className="codeblock">{mcpConf}</pre>
+          <div className="tool-grid">
+            {tools.map(([n, d]) => <div key={n} className="tool"><code>{n}</code><span title={d}>{d}</span></div>)}
+          </div>
+        </section>
+        <section className="card gcard">
+          <div className="gcard-head"><h3>REST</h3><span className="muted">请求头 Authorization: Bearer &lt;密钥&gt;</span></div>
+          <div className="rest">
+            {rest.map(([m, p, d]) => <div key={m + p} className="rest-row"><span className={`verb is-${m.toLowerCase()}`}>{m}</span><code>{p}</code><span className="rest-desc">{d}</span></div>)}
+          </div>
+          <pre className="codeblock">{`curl -X POST ${origin}/v1/videos \\
+  -H "Authorization: Bearer <密钥>" -H "Content-Type: application/json" \\
+  -d '{"image_url":"https://…/frame.png","prompt":"她缓缓回头，风吹起发梢","seconds":5}'`}</pre>
+        </section>
+      </div>
+      <Modal open={adding} onClose={() => setAdding(false)} title="新建密钥"
+        footer={<><button className="btn btn-secondary" onClick={() => setAdding(false)}>取消</button><button className="btn btn-primary" onClick={create}>创建</button></>}>
+        <label className="field"><span className="field-label">名称</span><input className="input" autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="例如：写作助手" onKeyDown={e => e.key === 'Enter' && create()} /></label>
+      </Modal>
+      <Modal open={!!created} onClose={() => setCreated(null)} title="密钥只显示这一次"
+        footer={<button className="btn btn-primary" onClick={() => setCreated(null)}>好了</button>}>
+        
+        <div className="endpoint big"><code>{created}</code><button className="icon-btn sm" onClick={() => created && copy(created)} aria-label="复制" title="复制"><Copy size={14} /></button></div>
+      </Modal>
+    </div>
+  )
+}
