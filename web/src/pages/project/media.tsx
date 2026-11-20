@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { Check, ImagePlus, Trash2, X } from 'lucide-react'
+import { Check, Download, FolderInput, ImagePlus, Trash2, X } from 'lucide-react'
+import { AttachModal } from '../../components/imgtools'
 import { createPortal } from 'react-dom'
 import { api, upload, type Img } from '../../api'
 import { useProject } from '../Project'
@@ -32,7 +33,9 @@ export function Picker({ images, picked, aspect, busy, empty }: { images: Img[];
 }
 
 export function Viewer({ img, picked, onClose }: { img: Img; picked: boolean; onClose: () => void }) {
-  const { run } = useProject()
+  const { run, reload } = useProject()
+  const [attach, setAttach] = useState(false)
+  if (attach) return <AttachModal img={img} onClose={() => { setAttach(false); onClose() }} onDone={reload} />
   return createPortal(
     <div className="viewer" onMouseDown={e => e.target === e.currentTarget && onClose()}>
       <button className="viewer-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
@@ -40,6 +43,8 @@ export function Viewer({ img, picked, onClose }: { img: Img; picked: boolean; on
       <div className="viewer-bar">
         <span className="viewer-meta">{img.width}×{img.height} · {img.source === 'upload' ? '上传' : img.model || '生成'}</span>
         <span className="grow" />
+        <a className="icon-btn sm viewer-ic" href={img.url} download title="下载" aria-label="下载"><Download size={15} /></a>
+        <button className="btn btn-secondary btn-sm" onClick={() => setAttach(true)} title="复制一份到任意资产（比如当另一个角色的参考图）"><FolderInput size={14} />存到资产</button>
         {!picked && <button className="btn btn-primary btn-sm" onClick={async () => { await run(() => api(`/api/images/${img.id}/pick`, { method: 'POST' }), '已选用'); onClose() }}><Check size={14} />选用</button>}
         <button className="btn btn-secondary btn-sm" onClick={async () => { if (confirm('删除这张图？')) { await run(() => api(`/api/images/${img.id}`, { method: 'DELETE' })); onClose() } }}><Trash2 size={14} />删除</button>
       </div>

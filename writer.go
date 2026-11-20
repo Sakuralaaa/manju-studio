@@ -805,6 +805,7 @@ type assetArgs struct {
 	Prompt           string  `json:"prompt"`
 	VoiceDescription string  `json:"voice_description"`
 	VoiceSampleText  string  `json:"voice_sample_text"`
+	BaseCode         *string `json:"base_code"`
 }
 
 // lookDescription 固定造型字段 → 外观描述。每句都带 consistency.go 认得的外貌词（发/眉/身形/穿/戴），
@@ -937,12 +938,36 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 			warn = append(warn, "这个角色已经有音色，没有覆盖；要换请在应用里改")
 		}
 	}
+	if a.BaseCode != nil {
+		bc := strings.TrimSpace(*a.BaseCode)
+		var bid int64
+		if bc != "" {
+			for _, x := range listAssets(p.ID) {
+				if strings.EqualFold(x.Code, bc) || x.Name == bc {
+					bid = x.ID
+				}
+			}
+			if bid == 0 {
+				return nil, fmt.Errorf("base_code「%s」不存在", bc)
+			}
+		}
+		cur, _ = getAsset(cur.ID)
+		if err := setAssetBase(cur, bid); err != nil {
+			return nil, err
+		}
+	}
 	cur, _ = getAsset(cur.ID)
 	if !created && cur.PickedImageID > 0 && strings.TrimSpace(a.Description+lookDescription(a.Look)) != "" {
 		warn = append(warn, "外观已更新，已有的设定图不会自动重画；需要的话在应用的「资产」里重新生成")
 	}
-	return map[string]any{"ok": true, "created": created, "asset_id": cur.ID, "code": cur.Code, "kind": cur.Kind, "name": cur.Name,
-		"description": cur.Description, "fixed_look": charLook(p, cur), "has_image": cur.PickedImageID > 0, "warnings": nonNil(warn)}, nil
+	out := map[string]any{"ok": true, "created": created, "asset_id": cur.ID, "code": cur.Code, "kind": cur.Kind, "name": cur.Name,
+		"description": cur.Description, "fixed_look": charLook(p, cur), "has_image": cur.PickedImageID > 0, "warnings": nonNil(warn)}
+	if cur.BaseID > 0 {
+		if b, err := getAsset(cur.BaseID); err == nil {
+			out["same_person_as"] = b.Code + " " + b.Name
+		}
+	}
+	return out, nil
 }
 
 func charLookOf(name, desc string) string {
@@ -954,6 +979,11 @@ func charLookOf(name, desc string) string {
 func assetBrief(p *Project, a *Asset) map[string]any {
 	m := map[string]any{"asset_id": a.ID, "code": a.Code, "kind": a.Kind, "name": a.Name, "description": a.Description,
 		"has_image": a.PickedImageID > 0, "has_sheet": a.SheetImageID > 0, "has_expressions": a.ExprImageID > 0, "appear_in_shots": a.Appear}
+	if a.BaseID > 0 {
+		if b, err := getAsset(a.BaseID); err == nil {
+			m["same_person_as"] = b.Code
+		}
+	}
 	if a.Kind == "character" {
 		m["fixed_look"] = charLook(p, a)
 		m["has_voice"] = !a.Voice.empty()
@@ -1149,26 +1179,38 @@ func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 	p, _ := getProject(as.ProjectID)
 	which := a.Which
 	if len(which) == 0 {
-		which = []string{"main", "sheet", "expressions"}
+		which = []string{"main", "sheet", "expressions", "refs"}
 	}
-	labels := map[string]string{"main": "设定图", "sheet": "定妆三视图", "expressions": "表情表"}
-	ids := map[string]int64{"main": as.PickedImageID, "sheet": as.SheetImageID, "expressions": as.ExprImageID}
+	labels := map[string]string{"main": "设定图", "sheet": "三视图", "expressions": "表情表", "refs": "参考照"}
+	ids := map[string]int64{"main": as.PickedImageID, "sheet": as.SheetImageID, "expressions": as.ExprImageID, "refs": 0}
+	var refIDs []int64
+	for _, im := range as.Images {
+		if im.Tag == "ref" {
+			refIDs = append(refIDs, im.ID)
+		}
+	}
 	blocks := []any{}
 	shown := []string{}
 	for _, w := range which {
 		id, ok := ids[w]
 		if !ok {
-			return nil, errors.New("which 只能包含 main / sheet / expressions")
+			return nil, errors.New("which 只能包含 main / sheet / expressions / refs")
 		}
-		if id == 0 {
-			continue
+		list := []int64{id}
+		if w == "refs" {
+			list = refIDs
 		}
-		blk, im, err := imageBlockByID(id, a.MaxEdge, a.Original)
-		if err != nil {
-			return nil, err
+		for _, id := range list {
+			if id == 0 {
+				continue
+			}
+			blk, im, err := imageBlockByID(id, a.MaxEdge, a.Original)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, textBlock(fmt.Sprintf("%s · %s · 图片编号 %d（%d×%d）", as.Name, labels[w], im.ID, im.Width, im.Height)), blk)
+			shown = append(shown, labels[w])
 		}
-		blocks = append(blocks, textBlock(fmt.Sprintf("%s · %s（%d×%d）", as.Name, labels[w], im.Width, im.Height)), blk)
-		shown = append(shown, labels[w])
 	}
 	info := assetBrief(p, as)
 	head := fmt.Sprintf("%s %s「%s」\n外观：%s", as.Code, map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}[as.Kind], as.Name, orDefault(as.Description, "（未写）"))
@@ -1555,10 +1597,11 @@ var writerTools = []mcpTool{
 		"prompt":            str("生图提示词（可选，单独描述这个资产本身）"),
 		"voice_description": str("音色描述（可选，角色）：年龄感、音色质感、语速、口音"),
 		"voice_sample_text": str("试音台词（可选）"),
+		"base_code":         str("同一个人的另一个时期 / 另一套造型时，填本体角色的编号（如 C01）：出图时拿本体的图锁脸，发型服装按这个角色自己的 look。名字写成「阿策（千禧年）」且已有「阿策」时会自动挂上；填空字符串取消"),
 	}, "project_id")},
-	{"view_asset_images", "看资产的图片：设定图、定妆三视图、表情表。返回图片内容块（默认缩到长边 1536 像素的 JPEG；original=true 返回原图）。", obj(map[string]any{
+	{"view_asset_images", "看资产的图片：设定图、三视图、表情表、参考照，每张都标出图片编号（可用作 image_generate 的参考图）。返回图片内容块（默认缩到长边 1536 像素的 JPEG；original=true 返回原图）。", obj(map[string]any{
 		"asset_id": num("资产编号"), "project_id": num("作品编号（与 name 一起用）"), "name": str("资产名称或编号"),
-		"which":    arr("要看哪些，默认全部", map[string]any{"type": "string", "enum": []string{"main", "sheet", "expressions"}}),
+		"which":    arr("要看哪些，默认全部", map[string]any{"type": "string", "enum": []string{"main", "sheet", "expressions", "refs"}}),
 		"original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，256–4096，默认 1536"),
 	})},
 	{"view_shot", "看一个镜头：文字信息 + 关键帧图片 + 选定视频的第一帧和最后一帧（图片内容块）。完整视频用 get_video_link。", obj(map[string]any{

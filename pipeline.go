@@ -347,6 +347,13 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 	if len(noImg) > 0 {
 		return fmt.Errorf("这些资产没能生成设定图：%s", strings.Join(noImg, "、"))
 	}
+	// 角色三视图：关键帧锁脸主要靠它；失败不挡流程（关键帧会退回用设定图）
+	if n, _ := startMissingSheets(p); n > 0 {
+		pp.setStage("assets", fmt.Sprintf("生成 %d 张角色三视图", n))
+		if err := waitIdle(ctx, p.ID, "image-sheet"); err != nil {
+			return err
+		}
+	}
 	if p.AudioMode == "dub" && firstVoiceChannel("mimo") != nil {
 		need := p.NarratorVoice.empty()
 		for _, a := range listAssets(p.ID) {

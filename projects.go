@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ---------- 资产（跨集共享） ----------
@@ -25,17 +27,18 @@ type Asset struct {
 	SheetImageID  int64     `json:"sheet_image_id"`
 	ExprImageID   int64     `json:"expr_image_id"`
 	Voice         VoiceSpec `json:"voice"`
+	BaseID        int64     `json:"base_id"` // 同一个人的另一个时期：生图时拿本体的图锁脸
 	Sort          int       `json:"sort"`
 	Images        []*Image  `json:"images"`
 	Appear        int       `json:"appear"`
 }
 
-const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort`
+const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id`
 
 func scanAsset(sc interface{ Scan(...any) error }) (*Asset, error) {
 	var a Asset
 	var voice string
-	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort); err != nil {
+	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(voice), &a.Voice)
@@ -258,6 +261,7 @@ const extractSystem = `你是漫剧美术统筹。阅读本集剧本，列出需
 - 场景：每个独立地点一项；description 写空间结构、时代、光线、主色调；
 - 道具：只列剧情关键、会被特写的物件，没有就留空数组；
 - prompt：写给生图模型的中文提示词，单独描述这个资产本身，不要出现其他角色；
+- 同一个人物的不同时期 / 不同造型（少年时、多年前、换装后）单独列一项，name 写成「本名（时期）」，如「阿策（千禧年）」，description 只写这个时期的年龄感、发型和服装；应用会自动拿本名那个角色的图锁脸；
 - 已在资产库里的（见下方名单）不要重复列出。
 只输出 JSON：{"characters":[{"name":"","description":"","prompt":""}],"scenes":[...],"props":[...]}`
 
@@ -327,10 +331,14 @@ func handleAssetsExtract(w http.ResponseWriter, r *http.Request) {
 }
 
 type assetDraft struct {
+	BaseID      *int64 `json:"base_id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Prompt      string `json:"prompt"`
 }
+
+// tagCol 资产图片标签 → 选定列（ref 参考图没有选定列）
+var tagCol = map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}
 
 var kindPrefix = map[string]string{"character": "C", "scene": "S", "prop": "P"}
 
@@ -360,7 +368,67 @@ func insertAsset(pid int64, kind string, d assetDraft) (int64, error) {
 		return 0, err
 	}
 	touchProject(pid)
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err == nil && d.BaseID == nil && kind == "character" {
+		if b := guessBase(pid, d.Name); b > 0 {
+			d.BaseID = &b
+		}
+	}
+	if err == nil && d.BaseID != nil && *d.BaseID > 0 {
+		if a, e := getAsset(id); e == nil {
+			if e := setAssetBase(a, *d.BaseID); e != nil {
+				return id, e
+			}
+		}
+	}
+	return id, err
+}
+
+var periodSuffixRe = regexp.MustCompile(`^(.+?)\s*(?:[（(【\[].+[）)】\]]|[·・\-—]\s*\S+)$`)
+
+// guessBase 「阿策（千禧年）」「阿策·少年」这种名字：同作品里已有「阿策」时自动挂到它名下
+func guessBase(pid int64, name string) int64 {
+	m := periodSuffixRe.FindStringSubmatch(strings.TrimSpace(name))
+	if m == nil {
+		return 0
+	}
+	root := strings.TrimSpace(m[1])
+	var id int64
+	_ = db.QueryRow(`SELECT id FROM assets WHERE project_id=? AND kind='character' AND name=? ORDER BY id LIMIT 1`, pid, root).Scan(&id)
+	return id
+}
+
+// setAssetBase 把角色挂到另一个角色名下，作为同一个人的另一个时期（0 = 取消）
+func setAssetBase(a *Asset, baseID int64) error {
+	if baseID == 0 {
+		_, _ = db.Exec(`UPDATE assets SET base_id=0 WHERE id=?`, a.ID)
+		return nil
+	}
+	if a.Kind != "character" {
+		return errors.New("只有角色可以设为另一个时期")
+	}
+	b, err := getAsset(baseID)
+	if err != nil || b.ProjectID != a.ProjectID || b.Kind != "character" {
+		return errors.New("本体角色不存在（要在同一个作品里）")
+	}
+	if b.ID == a.ID {
+		return errors.New("不能把角色挂在自己名下")
+	}
+	// 链到底：本体本身也是某人的另一时期时，直接挂到最初的本体上
+	for i := 0; i < 5 && b.BaseID > 0; i++ {
+		nb, err := getAsset(b.BaseID)
+		if err != nil || nb.ID == a.ID {
+			break
+		}
+		b = nb
+	}
+	if b.ID == a.ID {
+		return errors.New("不能互相挂靠")
+	}
+	_, _ = db.Exec(`UPDATE assets SET base_id=? WHERE id=?`, b.ID, a.ID)
+	// 原来挂在这个角色名下的时期，跟着挂到新本体
+	_, _ = db.Exec(`UPDATE assets SET base_id=? WHERE base_id=?`, b.ID, a.ID)
+	return nil
 }
 
 func handleAssetCreate(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +472,12 @@ func handleAssetUpdate(w http.ResponseWriter, r *http.Request) {
 		in.Name = a.Name
 	}
 	_, _ = db.Exec(`UPDATE assets SET name=?,description=?,prompt=? WHERE id=?`, strings.TrimSpace(in.Name), strings.TrimSpace(in.Description), strings.TrimSpace(in.Prompt), a.ID)
+	if in.BaseID != nil && *in.BaseID != a.BaseID {
+		if err := setAssetBase(a, *in.BaseID); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+	}
 	if in.Voice != nil {
 		_, _ = db.Exec(`UPDATE assets SET voice=? WHERE id=?`, mustJSON(in.Voice), a.ID)
 	}
@@ -421,6 +495,7 @@ func handleAssetDelete(w http.ResponseWriter, r *http.Request) {
 		deleteImageRow(im)
 	}
 	_, _ = db.Exec(`DELETE FROM assets WHERE id=?`, a.ID)
+	_, _ = db.Exec(`UPDATE assets SET base_id=0 WHERE base_id=?`, a.ID)
 	touchProject(a.ProjectID)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -459,8 +534,8 @@ func assetPrompt(p *Project, a *Asset, tag string) string {
 	} else if a.Kind == "character" && a.Description != "" && !strings.Contains(body, a.Description) {
 		parts = append(parts, "外貌："+a.Description)
 	}
-	if notes := assetRefNotes(a, tag); len(notes) > 0 {
-		parts = append(parts, strings.Join(notes, "，")+"；脸、发型、服装必须与参考图完全一致")
+	if n := assetRefNoteText(a, tag); n != "" {
+		parts = append(parts, n)
 	}
 	if isRealistic(p) {
 		parts = append(parts, realTail)
@@ -468,36 +543,86 @@ func assetPrompt(p *Project, a *Asset, tag string) string {
 	return strings.Join(parts, "。")
 }
 
-// assetRefIDs 定妆图的参考：三视图以设定图为参考；表情表与重画设定图优先用三视图，再加设定图
-func assetRefIDs(a *Asset, tag string) ([]int64, []string) {
-	if a.Kind != "character" {
-		return nil, nil
-	}
-	var ids []int64
-	var notes []string
-	switch tag {
-	case "sheet":
-		if a.PickedImageID > 0 {
-			ids, notes = append(ids, a.PickedImageID), append(notes, "设定图")
-		}
-	default: // expr / 重画设定图
-		if a.SheetImageID > 0 {
-			ids, notes = append(ids, a.SheetImageID), append(notes, "定妆三视图")
-		}
-		if a.PickedImageID > 0 && tag == "expr" {
-			ids, notes = append(ids, a.PickedImageID), append(notes, "设定图")
-		}
-	}
-	return ids, notes
+// assetRef 资产出图用的一张参考图
+type assetRef struct {
+	ID   int64
+	Kind string // own：自己的定妆图（脸、发型、服装都一致）；face：只锁脸；look：只参考外形风格
+	Note string
 }
 
-func assetRefNotes(a *Asset, tag string) []string {
-	_, kinds := assetRefIDs(a, tag)
-	var out []string
-	for i, k := range kinds {
-		out = append(out, refNote(i+1, "这个角色", a.Name, k, false))
+// assetRefs 资产出图的参考图，按优先级排列（调用方按渠道上限截断）：
+//   - 三视图以设定图为参考；表情表与重画设定图优先用三视图，再加设定图（自己的图：脸、发型、服装都一致）
+//   - 手动指定的参考图（tag=ref）：角色只锁脸，场景、道具参考外形与风格
+//   - 另一时期（base_id）：拿本体的三视图 / 设定图只锁脸，年龄、发型、服装按自己的描述
+func assetRefs(a *Asset, tag string) []assetRef {
+	var out []assetRef
+	isChar := a.Kind == "character"
+	if isChar {
+		switch tag {
+		case "sheet":
+			if a.PickedImageID > 0 {
+				out = append(out, assetRef{a.PickedImageID, "own", "设定图"})
+			}
+		default:
+			if a.SheetImageID > 0 {
+				out = append(out, assetRef{a.SheetImageID, "own", "定妆三视图"})
+			}
+			if a.PickedImageID > 0 && tag == "expr" {
+				out = append(out, assetRef{a.PickedImageID, "own", "设定图"})
+			}
+		}
+	}
+	// 手动参考图：最新的两张
+	refs := listImages(`WHERE owner_type='asset' AND owner_id=? AND tag='ref' ORDER BY id DESC LIMIT 2`, a.ID)
+	for _, im := range refs {
+		k := "look"
+		if isChar {
+			k = "face"
+		}
+		out = append(out, assetRef{im.ID, k, "参考照"})
+	}
+	if isChar && a.BaseID > 0 && a.BaseID != a.ID {
+		if b, err := getAsset(a.BaseID); err == nil {
+			if id, note := charRefImage(b); id > 0 {
+				out = append(out, assetRef{id, "base:" + b.Name, note})
+			}
+		}
 	}
 	return out
+}
+
+// assetRefNoteText 说明每张参考图是什么、该参考什么
+func assetRefNoteText(a *Asset, tag string) string {
+	return refNotesFor(a, assetRefs(a, tag))
+}
+
+func refNotesFor(a *Asset, refs []assetRef) string {
+	var own, other []string
+	for i, r := range refs {
+		n := i + 1
+		switch {
+		case r.Kind == "own":
+			own = append(own, refNote(n, "这个角色", a.Name, r.Note, false))
+		case r.Kind == "face":
+			other = append(other, fmt.Sprintf("参考图%d是「%s」的参考照：脸型、五官、骨相、肤色以它为准，画成同一个人", n, a.Name))
+		case r.Kind == "look":
+			other = append(other, fmt.Sprintf("参考图%d是「%s」的参考图：外形、材质和风格以它为准", n, a.Name))
+		case strings.HasPrefix(r.Kind, "base:"):
+			bn := strings.TrimPrefix(r.Kind, "base:")
+			s := fmt.Sprintf("参考图%d是同一个人「%s」另一个时期的%s", n, bn, r.Note)
+			if r.Note == "定妆三视图" {
+				s += "（同一个人的正面、侧面、背面）"
+			}
+			s += "：必须是同一个人，脸型、五官比例、眼型、鼻型、唇形、骨相和肤色特征保持一致；年龄感、发型、妆容、服装和配饰按本次描述来画，不要照搬参考图的发型和服装"
+			other = append(other, s)
+		}
+	}
+	var parts []string
+	if len(own) > 0 {
+		parts = append(parts, strings.Join(own, "，")+"；脸、发型、服装必须与这些参考图完全一致")
+	}
+	parts = append(parts, other...)
+	return strings.Join(parts, "。")
 }
 
 func assetAspect(kind, tag, projectAspect string) string {
@@ -516,34 +641,45 @@ func assetAspect(kind, tag, projectAspect string) string {
 	return projectAspect
 }
 
-// genAssetTask tag 为空 = 设定图；sheet = 三视图；expr = 表情表
-func genAssetTask(p *Project, a *Asset, n int, tag string) (int64, error) {
+// genAssetTask tag 为空 = 设定图；sheet = 三视图；expr = 表情表。chID/model 不为空时覆盖作品默认的生图渠道
+func genAssetTask(p *Project, a *Asset, n int, tag string, ov ...imgOverride) (int64, error) {
 	ch, model, err := imageChannelFor(p)
 	if err != nil {
 		return 0, err
 	}
-	if tag != "" && a.Kind != "character" {
-		return 0, errors.New("只有角色可以做定妆图")
-	}
-	prompt := assetPrompt(p, a, tag)
-	params := paramsFor(ch, assetAspect(a.Kind, tag, p.Aspect), n)
-	var refs []refFile
-	ids, _ := assetRefIDs(a, tag)
-	if lim := refLimit(ch); len(ids) > lim {
-		ids = ids[:lim]
-	}
-	for _, id := range ids {
-		if im, err := getImage(id); err == nil {
-			if rf, err := readImageRef(im); err == nil {
-				refs = append(refs, rf)
-			}
+	if len(ov) > 0 {
+		if ch, model, err = applyOverride(ch, model, ov[0]); err != nil {
+			return 0, err
 		}
 	}
+	if tag != "" && a.Kind != "character" {
+		return 0, errors.New("只有角色可以做三视图和表情表")
+	}
+	params := paramsFor(ch, assetAspect(a.Kind, tag, p.Aspect), n)
 	kind := "image"
 	if tag != "" {
 		kind = "image-" + tag
 	}
 	return startTask(p.ID, 0, kind, "asset", a.ID, func(ctx context.Context) error {
+		waitBaseImage(ctx, a)
+		if x, err := getAsset(a.ID); err == nil {
+			a = x
+		}
+		all := assetRefs(a, tag)
+		if lim := refLimit(ch); len(all) > lim {
+			all = all[:lim]
+		}
+		var refs []refFile
+		var kept []assetRef
+		for _, r := range all {
+			if im, err := getImage(r.ID); err == nil {
+				if rf, err := readImageRef(im); err == nil {
+					refs = append(refs, rf)
+					kept = append(kept, r)
+				}
+			}
+		}
+		prompt := assetPromptWith(p, a, tag, kept)
 		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
 		ledgerAdd(p.ID, 0, "image", len(imgs), 0, 0, 0, "")
 		if err != nil {
@@ -565,6 +701,70 @@ func genAssetTask(p *Project, a *Asset, n int, tag string) (int64, error) {
 	})
 }
 
+// waitBaseImage 另一时期的角色要拿本体的图锁脸：本体还在出图（比如「全部生成」同时开始）时，先等它出完，最多 5 分钟
+func waitBaseImage(ctx context.Context, a *Asset) {
+	if a.Kind != "character" || a.BaseID == 0 {
+		return
+	}
+	for i := 0; i < 100; i++ {
+		b, err := getAsset(a.BaseID)
+		if err != nil {
+			return
+		}
+		if id, _ := charRefImage(b); id > 0 {
+			return
+		}
+		var busy int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE status='running' AND owner_type='asset' AND owner_id=?`, b.ID).Scan(&busy)
+		if busy == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// assetPromptWith 与 assetPrompt 相同，但参考图说明只写实际发出去的那几张
+func assetPromptWith(p *Project, a *Asset, tag string, refs []assetRef) string {
+	full := assetPrompt(p, a, tag)
+	if all := assetRefNoteText(a, tag); all != "" {
+		full = strings.Replace(full, all, refNotesFor(a, refs), 1)
+	}
+	return strings.ReplaceAll(full, "。。", "。")
+}
+
+// imgOverride 单次出图指定渠道和模型（界面下拉 / 智能体参数）
+type imgOverride struct {
+	ChannelID int64  `json:"channel_id"`
+	Model     string `json:"model"`
+}
+
+func applyOverride(ch *Channel, model string, o imgOverride) (*Channel, string, error) {
+	if o.ChannelID > 0 {
+		c, err := getChannel(o.ChannelID)
+		if err != nil || c.Kind != "image" {
+			return nil, "", fmt.Errorf("生图渠道 %d 不存在", o.ChannelID)
+		}
+		if c.ID != ch.ID {
+			model = ""
+		}
+		ch = c
+	}
+	if m := strings.TrimSpace(o.Model); m != "" {
+		if len(ch.Models) > 0 && !contains(ch.Models, m) {
+			return nil, "", fmt.Errorf("渠道「%s」没有模型 %s，可选：%s", ch.Name, m, strings.Join(ch.Models, "、"))
+		}
+		model = m
+	}
+	if model == "" && len(ch.Models) > 0 {
+		model = ch.Models[0]
+	}
+	return ch, model, nil
+}
+
 func handleAssetGenerate(w http.ResponseWriter, r *http.Request) {
 	a, err := getAsset(pathID(r))
 	if err != nil {
@@ -575,12 +775,13 @@ func handleAssetGenerate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		N   int    `json:"n"`
 		Tag string `json:"tag"`
+		imgOverride
 	}
 	_ = readJSON(r, &in)
 	if in.Tag != "sheet" && in.Tag != "expr" {
 		in.Tag = ""
 	}
-	tid, err := genAssetTask(p, a, clampInt(in.N, 1, 4), in.Tag)
+	tid, err := genAssetTask(p, a, clampInt(in.N, 1, 4), in.Tag, in.imgOverride)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -605,6 +806,39 @@ func startMissingAssets(p *Project) (int, error) {
 		n++
 	}
 	return n, lastErr
+}
+
+// startMissingSheets 给已有设定图、还没有三视图的角色各做一张三视图（关键帧锁脸主要靠它）
+func startMissingSheets(p *Project) (int, error) {
+	n := 0
+	var lastErr error
+	for _, a := range listAssets(p.ID) {
+		if a.Kind != "character" || a.PickedImageID == 0 || a.SheetImageID > 0 || hasTag(a.Images, "sheet") {
+			continue
+		}
+		if _, err := genAssetTask(p, a, 1, "sheet"); err != nil {
+			if err.Error() != "正在进行中" {
+				lastErr = err
+			}
+			continue
+		}
+		n++
+	}
+	return n, lastErr
+}
+
+func handleSheetsGenerateAll(w http.ResponseWriter, r *http.Request) {
+	p, err := getProject(pathID(r))
+	if err != nil {
+		httpErr(w, 404, "作品不存在")
+		return
+	}
+	n, lastErr := startMissingSheets(p)
+	if n == 0 && lastErr != nil {
+		httpErr(w, 400, lastErr.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"started": n})
 }
 
 func hasTag(ims []*Image, tag string) bool {
@@ -637,8 +871,12 @@ func handleAssetUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tag := r.URL.Query().Get("tag")
-	if tag != "sheet" && tag != "expr" {
+	if tag != "sheet" && tag != "expr" && tag != "ref" {
 		tag = ""
+	}
+	if (tag == "sheet" || tag == "expr") && a.Kind != "character" {
+		httpErr(w, 400, "只有角色有三视图和表情表")
+		return
 	}
 	data, err := readUpload(r)
 	if err != nil {
@@ -650,8 +888,9 @@ func handleAssetUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	col := map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}[tag]
-	_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=?`, im.ID, a.ID)
+	if col := tagCol[tag]; col != "" {
+		_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=?`, im.ID, a.ID)
+	}
 	touchProject(a.ProjectID)
 	writeJSON(w, im)
 }
@@ -1037,10 +1276,15 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 	return strings.Join(parts, "。"), refs, picks
 }
 
-func genKeyframeTask(p *Project, s *Shot, n int) (int64, error) {
+func genKeyframeTask(p *Project, s *Shot, n int, ov ...imgOverride) (int64, error) {
 	ch, model, err := imageChannelFor(p)
 	if err != nil {
 		return 0, err
+	}
+	if len(ov) > 0 {
+		if ch, model, err = applyOverride(ch, model, ov[0]); err != nil {
+			return 0, err
+		}
 	}
 	if s.Chain == "ref" {
 		_, _ = ensurePrevLastFrame(s)
@@ -1077,9 +1321,10 @@ func handleKeyframeGenerate(w http.ResponseWriter, r *http.Request) {
 	p, _ := getProject(s.ProjectID)
 	var in struct {
 		N int `json:"n"`
+		imgOverride
 	}
 	_ = readJSON(r, &in)
-	tid, err := genKeyframeTask(p, s, clampInt(in.N, 1, 4))
+	tid, err := genKeyframeTask(p, s, clampInt(in.N, 1, 4), in.imgOverride)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return

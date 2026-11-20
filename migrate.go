@@ -104,6 +104,7 @@ var addCols = []struct{ table, col, def string }{
 	{"assets", "sheet_image_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"assets", "expr_image_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"assets", "voice", "TEXT NOT NULL DEFAULT '{}'"},
+	{"assets", "base_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"images", "tag", "TEXT NOT NULL DEFAULT ''"},
 	{"images", "episode_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"shots", "episode_id", "INTEGER NOT NULL DEFAULT 0"},

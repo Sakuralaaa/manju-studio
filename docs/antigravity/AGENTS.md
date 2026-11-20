@@ -31,6 +31,14 @@
 - 角色的**固定造型**（发型发色、五官特征、体型、服装配色、配饰）写在 `upsert_asset` 的 `look` 里，一经确定不要随意改。漫剧工坊会把它原样写进每张关键帧和封面的提示词。
 - 写剧本和分镜时，角色外观以 `get_writing_context` 返回的 `fixed_look` 和设定图为准；换装、受伤等变化要在 `picture` 和 `keyframe_prompt` 里明确写出，而不是改资产。
 - 同一画面里有多个角色时，`keyframe_prompt` 里分别点名，免得模型把一个人的服装套到另一个人身上。
+- **同一个人的不同时期 / 不同造型**（回忆里的年轻时、换了一身固定装扮）要单独建一个角色，并在 `upsert_asset` 里填 `base_code`（本体的编号，如 C01）；名字写成「阿策（千禧年）」这种格式时会自动挂上。这样出图时会拿本体的图锁脸，`look` 里只写这个时期的年龄感、发型和服装。分镜里出现哪个时期就引用哪个编号。
+
+## 出图
+
+- 给作品角色出图用 `generate_asset_image`（会自动带上角色已选定的图、参考照和本体角色），不要用 `image_generate` 自己拼。
+- 要指定渠道和模型，先 `list_image_channels`，再在 `generate_asset_image` / `generate_keyframe` / `image_generate` 里传 `channel_id` 和 `model`。
+- `image_generate` 生成的图会放进应用的「画室」，用户能直接看；可用 `ref_image_ids`（`view_asset_images` 会标出每张图的编号）带参考图。需要放进作品时用 `attach_image` 存到资产：设定图 / 三视图 / 表情表 / 参考照（tag=ref，以后出图锁脸用）。
+- 出图会花用户的生图额度：先出 1 张看效果，用户满意再多出。
 
 ## 分镜要求
 

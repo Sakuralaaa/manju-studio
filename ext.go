@@ -390,46 +390,192 @@ func toolTTS(ctx context.Context, a ttsArgs, base string) (any, error) {
 	return map[string]any{"url": base + "/v1/audio/" + name, "duration": dur}, nil
 }
 
-type imageArgs struct {
-	Prompt    string `json:"prompt"`
-	ChannelID int64  `json:"channel_id"`
-	Model     string `json:"model"`
-	Aspect    string `json:"aspect"`
-	N         int    `json:"n"`
-}
+type imageArgs = studioIn
 
 func toolImageGenerate(ctx context.Context, a imageArgs, base string) (any, error) {
-	if strings.TrimSpace(a.Prompt) == "" {
-		return nil, errors.New("prompt 不能为空")
-	}
-	var ch *Channel
-	if a.ChannelID > 0 {
-		ch, _ = getChannel(a.ChannelID)
-	}
-	if ch == nil {
-		ch = firstChannel("image")
-	}
-	if ch == nil || ch.Kind != "image" {
-		return nil, errors.New("没有可用的生图渠道")
-	}
-	if a.Aspect == "" {
-		a.Aspect = "1:1"
-	}
 	c, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
-	imgs, sent, err := generateImages(c, ch, a.Model, a.Prompt, paramsFor(ch, a.Aspect, clampInt(a.N, 1, 4)), nil)
+	a.Owner = "ext"
+	ims, err := studioRun(c, a)
 	if err != nil {
 		return nil, err
 	}
 	out := []map[string]any{}
-	for _, data := range imgs {
-		im, err := storeImage(0, "ext", 0, data, "gen", sent, ch.ID, a.Model)
-		if err != nil {
+	for _, im := range ims {
+		out = append(out, map[string]any{"image_id": im.ID, "width": im.Width, "height": im.Height, "model": im.Model,
+			"channel_id": im.ChannelID, "url": fmt.Sprintf("%s/v1/images/%d/file", base, im.ID)})
+	}
+	return map[string]any{"images": out, "note": "图片已放进应用的「画室」，用户可以在界面里查看、下载；要放进作品，用 attach_image 存到资产（设定图 / 三视图 / 表情表 / 参考图）。"}, nil
+}
+
+// toolImageChannels 生图渠道和各自的模型、参考图上限
+func toolImageChannels(ctx context.Context) (any, error) {
+	out := []map[string]any{}
+	all, _ := listChannels()
+	for _, ch := range all {
+		if ch.Kind != "image" {
 			continue
 		}
-		out = append(out, map[string]any{"image_id": im.ID, "width": im.Width, "height": im.Height, "url": fmt.Sprintf("%s/v1/images/%d/file", base, im.ID)})
+		out = append(out, map[string]any{"channel_id": ch.ID, "name": ch.Name, "models": ch.Models, "default_model": firstOr(ch.Models), "max_refs": refLimit(ch)})
 	}
-	return map[string]any{"images": out}, nil
+	return map[string]any{"channels": out, "note": "image_generate / generate_asset_image 传 channel_id 和 model 指定；不传用第一个渠道（作品资产用作品设置里的渠道）。"}, nil
+}
+
+func firstOr(xs []string) string {
+	if len(xs) > 0 {
+		return xs[0]
+	}
+	return ""
+}
+
+type attachArgs struct {
+	ImageID int64  `json:"image_id"`
+	AssetID int64  `json:"asset_id"`
+	Tag     string `json:"tag"`
+}
+
+func toolAttachImage(ctx context.Context, a attachArgs) (any, error) {
+	tag := a.Tag
+	if tag == "base" || tag == "picked" {
+		tag = ""
+	}
+	im, as, err := copyImageTo(a.ImageID, a.AssetID, tag)
+	if err != nil {
+		return nil, err
+	}
+	what := map[string]string{"": "设定图（已选用）", "sheet": "三视图（已选用）", "expr": "表情表（已选用）", "ref": "参考图（以后给它出图时用来锁脸 / 定外形）"}[tag]
+	return map[string]any{"ok": true, "image_id": im.ID, "asset_id": as.ID, "code": as.Code, "name": as.Name, "saved_as": what}, nil
+}
+
+type assetGenArgs struct {
+	AssetID   int64  `json:"asset_id"`
+	ProjectID int64  `json:"project_id"`
+	Code      string `json:"code"`
+	Tag       string `json:"tag"`
+	N         int    `json:"n"`
+	ChannelID int64  `json:"channel_id"`
+	Model     string `json:"model"`
+	Wait      *bool  `json:"wait"`
+}
+
+// toolAssetGenerate 给资产出图：自动带上参考图（自己的定妆图、手动参考图、本体角色），默认等出完再返回
+func toolAssetGenerate(ctx context.Context, a assetGenArgs, base string) (any, error) {
+	var as *Asset
+	if a.AssetID > 0 {
+		as, _ = getAsset(a.AssetID)
+	} else if a.ProjectID > 0 && a.Code != "" {
+		for _, x := range listAssets(a.ProjectID) {
+			if strings.EqualFold(x.Code, strings.TrimSpace(a.Code)) {
+				as = x
+			}
+		}
+	}
+	if as == nil {
+		return nil, errors.New("资产不存在：给 asset_id，或 project_id + code")
+	}
+	p, err := getProject(as.ProjectID)
+	if err != nil {
+		return nil, errors.New("作品不存在")
+	}
+	tag := a.Tag
+	if tag == "base" || tag == "picked" {
+		tag = ""
+	}
+	if tag != "" && tag != "sheet" && tag != "expr" {
+		return nil, errors.New("tag 只能是 空（设定图）/ sheet（三视图）/ expr（表情表）")
+	}
+	if tag != "" && as.PickedImageID == 0 {
+		return nil, errors.New("先给这个角色生成并选定设定图，再做三视图 / 表情表")
+	}
+	before := map[int64]bool{}
+	for _, im := range as.Images {
+		before[im.ID] = true
+	}
+	tid, err := genAssetTask(p, as, clampInt(a.N, 1, 4), tag, imgOverride{a.ChannelID, a.Model})
+	if err != nil {
+		return nil, err
+	}
+	refs := []map[string]any{}
+	for _, r := range assetRefs(as, tag) {
+		role := map[string]string{"own": "自己的" + r.Note, "face": "参考照（锁脸）", "look": "参考图（外形风格）"}[r.Kind]
+		if strings.HasPrefix(r.Kind, "base:") {
+			role = "本体「" + strings.TrimPrefix(r.Kind, "base:") + "」的" + r.Note + "（只锁脸）"
+		}
+		refs = append(refs, map[string]any{"image_id": r.ID, "role": role})
+	}
+	if a.Wait != nil && !*a.Wait {
+		return map[string]any{"task_id": tid, "refs": refs, "note": "已开始生成；用 view_asset_images 查看结果"}, nil
+	}
+	ims, err := waitImages(ctx, tid, "asset", as.ID, before, base)
+	if err != nil {
+		return nil, err
+	}
+	if ims == nil {
+		return map[string]any{"task_id": tid, "note": "还在生成，稍后用 view_asset_images 查看"}, nil
+	}
+	return map[string]any{"ok": true, "asset_id": as.ID, "code": as.Code, "images": ims, "refs": refs,
+		"note": "新图已放进资产候选；如果这个位置原来是空的会自动选用。用 view_asset_images 看效果。"}, nil
+}
+
+// waitImages 等出图任务结束，返回这次新增的图；超时返回 nil, nil
+func waitImages(ctx context.Context, tid int64, ownerType string, ownerID int64, before map[int64]bool, base string) ([]map[string]any, error) {
+	deadline := time.Now().Add(7 * time.Minute)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-time.After(2 * time.Second):
+		}
+		var st, msg string
+		_ = db.QueryRow(`SELECT status,error FROM tasks WHERE id=?`, tid).Scan(&st, &msg)
+		if st == "failed" {
+			return nil, errors.New(msg)
+		}
+		if st == "done" {
+			out := []map[string]any{}
+			for _, im := range listImages(`WHERE owner_type=? AND owner_id=? ORDER BY id`, ownerType, ownerID) {
+				if !before[im.ID] {
+					out = append(out, map[string]any{"image_id": im.ID, "tag": im.Tag, "model": im.Model, "url": fmt.Sprintf("%s/v1/images/%d/file", base, im.ID)})
+				}
+			}
+			return out, nil
+		}
+	}
+	return nil, nil
+}
+
+type keyframeArgs struct {
+	ShotID    int64  `json:"shot_id"`
+	N         int    `json:"n"`
+	ChannelID int64  `json:"channel_id"`
+	Model     string `json:"model"`
+}
+
+func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error) {
+	s, err := getShot(a.ShotID)
+	if err != nil {
+		return nil, errors.New("镜头不存在")
+	}
+	p, err := getProject(s.ProjectID)
+	if err != nil {
+		return nil, errors.New("作品不存在")
+	}
+	before := map[int64]bool{}
+	for _, im := range listImages(`WHERE owner_type='shot' AND owner_id=?`, s.ID) {
+		before[im.ID] = true
+	}
+	tid, err := genKeyframeTask(p, s, clampInt(a.N, 1, 4), imgOverride{a.ChannelID, a.Model})
+	if err != nil {
+		return nil, err
+	}
+	ims, err := waitImages(ctx, tid, "shot", s.ID, before, base)
+	if err != nil {
+		return nil, err
+	}
+	if ims == nil {
+		return map[string]any{"task_id": tid, "note": "还在生成，稍后用 view_shot 查看"}, nil
+	}
+	return map[string]any{"ok": true, "shot_id": s.ID, "images": ims, "note": "新关键帧已放进候选；原来没有选定时自动选用。用 view_shot 看效果。"}, nil
 }
 
 // ---------- REST ----------
@@ -515,6 +661,28 @@ func extImageGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, err := toolImageGenerate(r.Context(), a, baseURL(r))
+	extReply(w, v, err)
+}
+
+func extImageCopy(w http.ResponseWriter, r *http.Request) {
+	var a attachArgs
+	if err := readJSON(r, &a); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	a.ImageID = pathID(r)
+	v, err := toolAttachImage(r.Context(), a)
+	extReply(w, v, err)
+}
+func extImageChannels(w http.ResponseWriter, r *http.Request) {
+	v, err := toolImageChannels(r.Context())
+	extReply(w, v, err)
+}
+func extAssetGenerate(w http.ResponseWriter, r *http.Request) {
+	var a assetGenArgs
+	_ = readJSON(r, &a)
+	a.AssetID = pathID(r)
+	v, err := toolAssetGenerate(r.Context(), a, baseURL(r))
 	extReply(w, v, err)
 }
 
@@ -642,9 +810,27 @@ var mcpTools = []mcpTool{
 	{"tts", "用角色音色（asset_id）或指定音色合成一句话，返回音频地址。", obj(map[string]any{
 		"text": str("要念的文字"), "emotion": str("语气，如：压低声音、愤怒"), "asset_id": num("角色资产编号"), "voice": map[string]any{"type": "object", "description": "音色：channel_id、mode（fish / builtin / design / clone / openai）、voice、sample、speed、pitch"},
 	}, "text")},
-	{"image_generate", "用生图渠道生成图片，返回图片编号和下载地址。", obj(map[string]any{
-		"prompt": str("提示词"), "channel_id": num("渠道编号，不填用第一个生图渠道"), "model": str("模型名"), "aspect": str("比例，如 9:16"), "n": num("张数 1–4"),
+	{"list_image_channels", "列出生图渠道：渠道编号、可用模型、参考图上限。指定渠道和模型出图前先看这个。", obj(map[string]any{})},
+	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。", obj(map[string]any{
+		"prompt": str("提示词。带参考图时写清每张参考图是谁、参考什么，如「参考图1是同一个人，脸型五官保持一致，只改发型和服装」"), "channel_id": num("渠道编号（list_image_channels），不填用第一个生图渠道"), "model": str("模型名，不填用渠道的第一个模型"),
+		"aspect": str("比例，如 9:16、3:4、1:1、16:9"), "n": num("张数 1–4"),
+		"ref_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "参考图：应用里已有图片的编号（资产图、画室图都行，view_asset_images 能看到编号）"},
+		"ref_images":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "参考图：base64 或 data URL"},
+		"realistic":     boolp("追加真人实拍质感的固定描述"),
 	}, "prompt")},
+	{"generate_asset_image", "给作品资产出图（设定图 / 三视图 / 表情表），自动带上参考图：角色自己已选定的图、手动加的参考照、以及「同一个人另一时期」的本体角色（只锁脸，发型服装按这个角色自己的外观）。默认等出完再返回新图编号。", obj(map[string]any{
+		"asset_id": num("资产编号"), "project_id": num("作品编号（配合 code）"), "code": str("资产编号，如 C03"),
+		"tag":        map[string]any{"type": "string", "enum": []string{"", "sheet", "expr"}, "description": "空 = 设定图；sheet = 三视图；expr = 表情表（后两个需要先有设定图）"},
+		"n":          num("张数 1–4，默认 1"),
+		"channel_id": num("渠道编号，不填用作品设置里的生图渠道"), "model": str("模型名"),
+		"wait": boolp("等出完再返回，默认 true"),
+	})},
+	{"generate_keyframe", "给一个镜头生成关键帧：自动按镜头里的资产带上角色 / 场景参考图。可指定渠道和模型。默认等出完再返回。", obj(map[string]any{
+		"shot_id": num("镜头编号"), "n": num("张数 1–4，默认 1"), "channel_id": num("渠道编号，不填用作品设置"), "model": str("模型名"),
+	}, "shot_id")},
+	{"attach_image", "把一张图（画室里的、别的资产的都行）复制进某个资产：tag 空 = 设为设定图并选用；sheet / expr = 三视图 / 表情表；ref = 参考照（以后给它出图时用来锁脸或定外形）。", obj(map[string]any{
+		"image_id": num("图片编号"), "asset_id": num("目标资产编号"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
+	}, "image_id", "asset_id")},
 }
 
 type rpcReq struct {
@@ -867,6 +1053,26 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		var a ttsArgs
 		_ = json.Unmarshal(args, &a)
 		return toolTTS(ctx, a, base)
+	case "list_image_channels":
+		return toolImageChannels(ctx)
+	case "attach_image":
+		var a attachArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return toolAttachImage(ctx, a)
+	case "generate_asset_image":
+		var a assetGenArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return toolAssetGenerate(ctx, a, base)
+	case "generate_keyframe":
+		var a keyframeArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return toolKeyframe(ctx, a, base)
 	case "image_generate":
 		var a imageArgs
 		_ = json.Unmarshal(args, &a)

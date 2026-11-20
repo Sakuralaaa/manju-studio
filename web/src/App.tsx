@@ -9,10 +9,12 @@ import Series from './pages/Series'
 import Compute from './pages/Compute'
 import Channels from './pages/Channels'
 import ApiPage from './pages/ApiPage'
+import Studio from './pages/Studio'
 import { accName, phaseLabels } from './labels'
 
 const nav: { p: Page; label: string }[] = [
   { p: 'projects', label: '作品' },
+  { p: 'studio', label: '画室' },
   { p: 'compute', label: '算力' },
   { p: 'channels', label: '渠道' },
   { p: 'api', label: '接口' },
@@ -87,6 +89,7 @@ function Shell() {
         {route.page === 'projects' && <Projects />}
         {route.page === 'series' && route.id && <Series key={route.id} id={route.id} />}
         {route.page === 'project' && route.ep && <ProjectPage key={route.ep} id={route.ep} />}
+        {route.page === 'studio' && <Studio />}
         {route.page === 'compute' && <Compute />}
         {route.page === 'channels' && <Channels />}
         {route.page === 'api' && <ApiPage />}

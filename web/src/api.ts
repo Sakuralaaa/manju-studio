@@ -12,7 +12,7 @@ export interface Preset { key: string; name: string; base_url: string; api_type:
 
 export interface Img {
   id: number; project_id: number; owner_type: string; owner_id: number; url: string; mime: string
-  width: number; height: number; bytes: number; source: 'gen' | 'upload' | 'extract'; prompt: string; channel_id: number; model: string; created_at: number; tag: '' | 'sheet' | 'expr'
+  width: number; height: number; bytes: number; source: 'gen' | 'upload' | 'extract'; prompt: string; channel_id: number; model: string; created_at: number; tag: '' | 'sheet' | 'expr' | 'ref'
 }
 export interface Video {
   id: number; project_id: number; episode_id: number; shot_id: number; source: string
@@ -44,7 +44,7 @@ export interface Pipe { id: number; episode_id: number; mode: 'auto' | 'ask' | '
 export interface ProjectCard extends Project { cover: string; episodes: number; finished: number; assets: number; steps: boolean[]; next_episode: number; next_no: number }
 export interface Asset {
   id: number; project_id: number; kind: 'character' | 'scene' | 'prop'; code: string; name: string; description: string; prompt: string
-  picked_image_id: number; sheet_image_id: number; expr_image_id: number; voice: VoiceSpec; sort: number; images: Img[]; appear: number
+  picked_image_id: number; sheet_image_id: number; expr_image_id: number; voice: VoiceSpec; sort: number; images: Img[]; appear: number; base_id: number
 }
 export interface Shot {
   id: number; project_id: number; episode_id: number; sort: number; code: string; duration: number; camera: string; action: string; dialogue: string
@@ -117,3 +117,6 @@ export function upload<T = any>(path: string, file: File | Blob, extra?: Record<
   if (extra) for (const k in extra) fd.append(k, extra[k])
   return api<T>(path, { raw: fd })
 }
+
+export interface StudioList { images: Img[]; tasks: Task[]; more: boolean }
+export interface RefLibItem { project_id: number; project: string; assets: Asset[] }

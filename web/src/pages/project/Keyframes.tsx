@@ -5,10 +5,11 @@ import { useProject, StepHead, Cost } from '../Project'
 import { useStore } from '../../store'
 import { Empty, Spinner } from '../../components/ui'
 import { Picker, UploadBtn } from './media'
+import { ModelSelect } from '../../components/imgtools'
 import { ShotEditor } from './Storyboard'
 
 export default function Keyframes() {
-  const { data, task, run, goStep } = useProject()
+  const { data, task, run, goStep, patch } = useProject()
   const { channels } = useStore()
   const p = data.project, e = data.episode
   const [edit, setEdit] = useState<Shot | null>(null)
@@ -18,7 +19,8 @@ export default function Keyframes() {
   const byCode = Object.fromEntries(data.assets.map(a => [a.code, a]))
   return (
     <section className="stepview">
-      <StepHead title="关键帧" note={ich ? `${ich.name} · 参考图上限 ${refMax} 张` : undefined}>
+      <StepHead title="关键帧" note={ich ? `参考图上限 ${refMax} 张` : undefined}>
+        <ModelSelect size="md" value={{ channel_id: p.image_channel_id, model: p.image_model }} onChange={cm => patch({ image_channel_id: cm.channel_id, image_model: cm.model })} />
         <button className="btn btn-secondary" disabled={missing === 0} onClick={() => run(() => api(`/api/episodes/${e.id}/keyframes/generate-all`, { method: 'POST' }), `开始生成 ${missing} 张`)}>
           <Sparkles size={16} />全部生成<Cost>{missing} 张</Cost>
         </button>

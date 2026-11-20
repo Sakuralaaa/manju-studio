@@ -33,7 +33,11 @@ const tools: [string, string][] = [
   ['video_submit', '提交图生视频任务'],
   ['video_status', '查询视频任务'],
   ['list_shots', '作品分镜'],
-  ['image_generate', '调用生图渠道'],
+  ['list_image_channels', '生图渠道、模型与参考图上限'],
+  ['image_generate', '自由出图（放进画室，可带参考图、指定模型）'],
+  ['generate_asset_image', '给角色 / 场景出图（自动带参考图锁脸）'],
+  ['generate_keyframe', '给镜头出关键帧（可指定模型）'],
+  ['attach_image', '把图存进资产（设定图 / 三视图 / 表情表 / 参考照）'],
 ]
 
 const rest: [string, string, string][] = [
@@ -47,7 +51,10 @@ const rest: [string, string, string][] = [
   ['GET', '/v1/videos/{id}/file', '下载视频'],
   ['GET', '/v1/projects', '作品列表'],
   ['GET', '/v1/projects/{id}/shots', '分镜'],
-  ['POST', '/v1/images', '生图 {prompt, channel_id, aspect, n}'],
+  ['POST', '/v1/images', '生图（进画室）{prompt, channel_id, model, aspect, n, ref_image_ids}'],
+  ['GET', '/v1/channels/image', '生图渠道与模型'],
+  ['POST', '/v1/assets/{id}/generate', '资产出图 {tag, n, channel_id, model}'],
+  ['POST', '/v1/images/{id}/copy', '存进资产 {asset_id, tag}'],
   ['GET', '/v1/images/{id}/file', '下载图片'],
 ]
 
