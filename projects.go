@@ -107,6 +107,8 @@ type Shot struct {
 	VideoPrompt    string   `json:"video_prompt"`
 	PickedImageID  int64    `json:"picked_image_id"`
 	PickedVideoID  int64    `json:"picked_video_id"`
+	RefImages      []*Image `json:"ref_images"`
+	refIDs         []int64
 	Chain          string   `json:"chain"`
 	SfxFile        string   `json:"-"`
 	SfxURL         string   `json:"sfx_url"`
@@ -116,13 +118,20 @@ type Shot struct {
 	Videos         []*Video `json:"videos"`
 }
 
-const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume`
+const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume,ref_ids`
 
 func scanShot(sc interface{ Scan(...any) error }) (*Shot, error) {
 	var s Shot
-	var codes string
-	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume); err != nil {
+	var codes, refs string
+	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume, &refs); err != nil {
 		return nil, err
+	}
+	_ = json.Unmarshal([]byte(refs), &s.refIDs)
+	s.RefImages = []*Image{}
+	for _, id := range s.refIDs {
+		if im, err := getImage(id); err == nil {
+			s.RefImages = append(s.RefImages, im)
+		}
 	}
 	_ = json.Unmarshal([]byte(codes), &s.Assets)
 	if s.Assets == nil {
@@ -548,6 +557,7 @@ type assetRef struct {
 	ID   int64
 	Kind string // own：自己的定妆图（脸、发型、服装都一致）；face：只锁脸；look：只参考外形风格
 	Note string
+	Face string // base：本体描述里的五官特征（痣、疤、眼型……），跨时期不变
 }
 
 // assetRefs 资产出图的参考图，按优先级排列（调用方按渠道上限截断）：
@@ -561,14 +571,14 @@ func assetRefs(a *Asset, tag string) []assetRef {
 		switch tag {
 		case "sheet":
 			if a.PickedImageID > 0 {
-				out = append(out, assetRef{a.PickedImageID, "own", "设定图"})
+				out = append(out, assetRef{ID: a.PickedImageID, Kind: "own", Note: "设定图"})
 			}
 		default:
 			if a.SheetImageID > 0 {
-				out = append(out, assetRef{a.SheetImageID, "own", "定妆三视图"})
+				out = append(out, assetRef{ID: a.SheetImageID, Kind: "own", Note: "定妆三视图"})
 			}
 			if a.PickedImageID > 0 && tag == "expr" {
-				out = append(out, assetRef{a.PickedImageID, "own", "设定图"})
+				out = append(out, assetRef{ID: a.PickedImageID, Kind: "own", Note: "设定图"})
 			}
 		}
 	}
@@ -579,12 +589,17 @@ func assetRefs(a *Asset, tag string) []assetRef {
 		if isChar {
 			k = "face"
 		}
-		out = append(out, assetRef{im.ID, k, "参考照"})
+		out = append(out, assetRef{ID: im.ID, Kind: k, Note: "参考照"})
 	}
 	if isChar && a.BaseID > 0 && a.BaseID != a.ID {
 		if b, err := getAsset(a.BaseID); err == nil {
-			if id, note := charRefImage(b); id > 0 {
-				out = append(out, assetRef{id, "base:" + b.Name, note})
+			id, note := charRefImage(b)
+			// 出设定图 / 表情表时用本体的单人设定图，免得照着三视图把这一张也排成三视图
+			if tag != "sheet" && b.PickedImageID > 0 {
+				id, note = b.PickedImageID, "设定图"
+			}
+			if id > 0 {
+				out = append(out, assetRef{ID: id, Kind: "base:" + b.Name, Note: note, Face: faceTraits(b.Description)})
 			}
 		}
 	}
@@ -613,7 +628,11 @@ func refNotesFor(a *Asset, refs []assetRef) string {
 			if r.Note == "定妆三视图" {
 				s += "（同一个人的正面、侧面、背面）"
 			}
-			s += "：必须是同一个人，脸型、五官比例、眼型、鼻型、唇形、骨相和肤色特征保持一致；年龄感、发型、妆容、服装和配饰按本次描述来画，不要照搬参考图的发型和服装"
+			s += "：必须是同一个人，脸型、五官比例、眼型、鼻型、唇形、骨相和肤色特征保持一致"
+			if r.Face != "" {
+				s += "（" + r.Face + "）"
+			}
+			s += "；年龄感、发型发色、妆容、服装和配饰一律按本次描述重新画，不要照搬参考图的发型、发色、服装和构图"
 			other = append(other, s)
 		}
 	}
@@ -1178,6 +1197,14 @@ func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 			ims = append(ims, im)
 		}
 	}
+	manual := func() {
+		for _, im := range s.RefImages {
+			add("参考", "本镜头参考图", "手动", im.ID, "手动")
+		}
+	}
+	if len(chars) == 0 {
+		manual()
+	}
 	for i, c := range chars {
 		// 主角、以及参考图位置够用时每个角色都用定妆三视图；否则用设定图（单人全身，占画面更少）
 		img, note := charRefImage(c.a)
@@ -1189,6 +1216,10 @@ func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 			if lf := prevLastFrame(s); lf != nil {
 				add("上一镜", "上一镜头最后一帧", "衔接", lf.ID, "衔接")
 			}
+		}
+		if i == 0 {
+			// 手动参考图排在主角之后：渠道上限很小时，先保住主角的脸
+			manual()
 		}
 	}
 	if len(chars) == 0 && s.Chain == "ref" {
@@ -1237,6 +1268,8 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 		used[pk.Code] = true
 		if pk.Kind == "衔接" {
 			notes = append(notes, fmt.Sprintf("参考图%d是上一个镜头的最后一帧，人物位置、光线和环境要与它连贯", len(refs)))
+		} else if pk.Kind == "手动" {
+			notes = append(notes, fmt.Sprintf("参考图%d是这个镜头指定的参考图，构图、姿势、氛围或道具按它来画，人物的脸仍以角色参考图为准", len(refs)))
 		} else {
 			notes = append(notes, refNote(len(refs), pk.Kind, pk.Name, pk.Note, true))
 		}
@@ -1267,7 +1300,11 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 		parts = append(parts, fmt.Sprintf("%s「%s」：%s", kinds[a.Kind], a.Name, a.Description))
 	}
 	if len(notes) > 0 {
-		parts = append(parts, strings.Join(notes, "，")+"；保持角色的脸、发型和服装与参考图一致，场景沿用参考图的空间与色调")
+		tail := "；保持角色的脸、发型和服装与参考图一致，场景沿用参考图的空间与色调"
+		if len(s.RefImages) > 0 {
+			tail = "；角色的脸、发型和服装以角色参考图为准，不要被指定参考图里的人物外貌带偏"
+		}
+		parts = append(parts, strings.Join(notes, "，")+tail)
 	}
 	if isRealistic(p) {
 		parts = append(parts, realTail)
@@ -1330,6 +1367,48 @@ func handleKeyframeGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"task_id": tid})
+}
+
+func handleShotRefsSet(w http.ResponseWriter, r *http.Request) {
+	s, err := getShot(pathID(r))
+	if err != nil {
+		httpErr(w, 404, "镜头不存在")
+		return
+	}
+	var in struct {
+		IDs []int64 `json:"ref_image_ids"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		httpErr(w, 400, "参数错误")
+		return
+	}
+	if err := setShotRefs(s, in.IDs); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	s, _ = getShot(s.ID)
+	writeJSON(w, s)
+}
+
+func setShotRefs(s *Shot, ids []int64) error {
+	clean := []int64{}
+	seen := map[int64]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		if _, err := getImage(id); err != nil {
+			return fmt.Errorf("图片 %d 不存在", id)
+		}
+		seen[id] = true
+		clean = append(clean, id)
+	}
+	if len(clean) > 4 {
+		return errors.New("每个镜头最多 4 张参考图")
+	}
+	b, _ := json.Marshal(clean)
+	_, err := db.Exec(`UPDATE shots SET ref_ids=? WHERE id=?`, string(b), s.ID)
+	return err
 }
 
 func handleShotRefs(w http.ResponseWriter, r *http.Request) {
@@ -1398,4 +1477,20 @@ func handleKeyframeUpload(w http.ResponseWriter, r *http.Request) {
 	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im.ID, s.ID)
 	touchEpisode(s.EpisodeID)
 	writeJSON(w, im)
+}
+
+var wearWordRe = regexp.MustCompile(`发|髻|辫|刘海|穿|衣|袍|衫|裙|裤|鞋|靴|帽|戴|披|外套|项链|耳环|眼镜|妆`)
+
+var faceWordRe = regexp.MustCompile(`眼|眉|痣|疤|鼻|唇|嘴|脸型|脸庞|下颌|颧|酒窝|雀斑|胎记|肤色|五官|骨相|轮廓`)
+
+// faceTraits 从本体描述里挑出跨时期不变的五官特征
+func faceTraits(desc string) string {
+	var out []string
+	for _, seg := range regexp.MustCompile(`[，,。；;、\n]+`).Split(desc, -1) {
+		seg = strings.TrimSpace(seg)
+		if seg != "" && faceWordRe.MatchString(seg) && !wearWordRe.MatchString(seg) {
+			out = append(out, seg)
+		}
+	}
+	return strings.Join(out, "，")
 }

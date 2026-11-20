@@ -128,6 +128,7 @@ func routes(m *http.ServeMux) {
 	a("PUT /api/shots/{id}", handleShotUpdate)
 	a("DELETE /api/shots/{id}", handleShotDelete)
 	a("GET /api/shots/{id}/refs", handleShotRefs)
+	a("PUT /api/shots/{id}/refs", handleShotRefsSet)
 	a("POST /api/shots/{id}/keyframe", handleKeyframeGenerate)
 	a("POST /api/shots/{id}/keyframe/upload", handleKeyframeUpload)
 	a("POST /api/shots/{id}/video", handleShotVideo)

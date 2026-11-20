@@ -545,10 +545,11 @@ func waitImages(ctx context.Context, tid int64, ownerType string, ownerID int64,
 }
 
 type keyframeArgs struct {
-	ShotID    int64  `json:"shot_id"`
-	N         int    `json:"n"`
-	ChannelID int64  `json:"channel_id"`
-	Model     string `json:"model"`
+	ShotID    int64   `json:"shot_id"`
+	N         int     `json:"n"`
+	ChannelID int64   `json:"channel_id"`
+	Model     string  `json:"model"`
+	RefIDs    []int64 `json:"ref_image_ids"`
 }
 
 func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error) {
@@ -559,6 +560,12 @@ func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error)
 	p, err := getProject(s.ProjectID)
 	if err != nil {
 		return nil, errors.New("作品不存在")
+	}
+	if a.RefIDs != nil {
+		if err := setShotRefs(s, a.RefIDs); err != nil {
+			return nil, err
+		}
+		s, _ = getShot(s.ID)
 	}
 	before := map[int64]bool{}
 	for _, im := range listImages(`WHERE owner_type='shot' AND owner_id=?`, s.ID) {
@@ -827,6 +834,7 @@ var mcpTools = []mcpTool{
 	})},
 	{"generate_keyframe", "给一个镜头生成关键帧：自动按镜头里的资产带上角色 / 场景参考图。可指定渠道和模型。默认等出完再返回。", obj(map[string]any{
 		"shot_id": num("镜头编号"), "n": num("张数 1–4，默认 1"), "channel_id": num("渠道编号，不填用作品设置"), "model": str("模型名"),
+		"ref_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "这个镜头额外的参考图编号（构图、姿势、氛围、道具），最多 4 张，会保存在镜头上；传空数组清掉。人物的脸仍按角色资产自动带"},
 	}, "shot_id")},
 	{"attach_image", "把一张图（画室里的、别的资产的都行）复制进某个资产：tag 空 = 设为设定图并选用；sheet / expr = 三视图 / 表情表；ref = 参考照（以后给它出图时用来锁脸或定外形）。", obj(map[string]any{
 		"image_id": num("图片编号"), "asset_id": num("目标资产编号"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},

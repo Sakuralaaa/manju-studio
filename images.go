@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -149,9 +150,29 @@ func generateImages(ctx context.Context, ch *Channel, model, prompt string, p Pa
 	var lastErr error
 	for i := 0; i < plan.Calls; i++ {
 		res, err := doCall(ctx, ch, plan, refs)
-		if err != nil && isRetryable(err) && ctx.Err() == nil {
-			time.Sleep(2 * time.Second)
+		for k, wait := range []time.Duration{3 * time.Second, 10 * time.Second} {
+			if err == nil || !isRetryable(err) || ctx.Err() != nil {
+				break
+			}
+			log.Printf("渠道 %d 第 %d 次重试：%v", ch.ID, k+1, err)
+			time.Sleep(wait)
 			res, err = doCall(ctx, ch, plan, refs)
+		}
+		if err != nil && ctx.Err() == nil && plan.Edit {
+			// 参考图的发送方式设错了：上游明确要 multipart / JSON 时换一种再试，并记到渠道上
+			msg := err.Error()
+			alt := ""
+			if plan.RefMode == "json" && strings.Contains(msg, "multipart/form-data") {
+				alt = "multipart"
+			} else if plan.RefMode == "multipart" && (strings.Contains(msg, "application/json") || strings.Contains(msg, "expected JSON")) {
+				alt = "json"
+			}
+			if alt != "" {
+				log.Printf("渠道 %d 参考图改用 %s 发送", ch.ID, alt)
+				plan.RefMode = alt
+				setChannelRefMode(ch.ID, alt)
+				res, err = doCall(ctx, ch, plan, refs)
+			}
 		}
 		if err != nil && ctx.Err() == nil && isResponseFormatRejected(plan, err) {
 			// 上游不认「直接返回图片数据」：改要链接再下载（同主机会带渠道密钥重试）
@@ -396,4 +417,15 @@ func handleTaskGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, t)
+}
+
+// setChannelRefMode 记住渠道实际支持的参考图发送方式，下次直接用
+func setChannelRefMode(id int64, mode string) {
+	ch, err := getChannel(id)
+	if err != nil {
+		return
+	}
+	ch.Caps.Refs.Mode = mode
+	b, _ := json.Marshal(ch.Caps)
+	_, _ = db.Exec(`UPDATE channels SET caps=? WHERE id=?`, string(b), id)
 }

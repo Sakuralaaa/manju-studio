@@ -652,3 +652,9 @@
   .studio-refnote { margin-left: 0; width: 100%; }
   .step-actions .model-sel { width: 100%; }
 }
+
+.kref.is-manual { background: var(--accent-soft); }
+.kref-x { display: grid; place-items: center; width: 16px; height: 16px; margin-left: 2px; border-radius: 8px; color: var(--muted); }
+.kref-x:hover { background: var(--chip-hover, rgba(0,0,0,.08)); color: var(--text); }
+.kref-add { padding: 0 10px 0 8px; color: var(--muted); border: 1px dashed var(--line); background: transparent; cursor: pointer; font-size: 12px; }
+.kref-add:hover { color: var(--text); border-color: var(--text); }

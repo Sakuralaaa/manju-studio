@@ -49,7 +49,7 @@ export interface Asset {
 export interface Shot {
   id: number; project_id: number; episode_id: number; sort: number; code: string; duration: number; camera: string; action: string; dialogue: string
   assets: string[]; keyframe_prompt: string; video_prompt: string; picked_image_id: number; picked_video_id: number
-  chain: 'off' | 'ref' | 'first'; sfx_url: string; sfx_name: string; sfx_volume: number; images: Img[]; videos: Video[]
+  chain: 'off' | 'ref' | 'first'; sfx_url: string; sfx_name: string; sfx_volume: number; images: Img[]; videos: Video[]; ref_images: Img[]
 }
 export interface Line {
   id: number; episode_id: number; shot_id: number; sort: number; speaker: string; asset_id: number; kind: 'dialogue' | 'narration'
