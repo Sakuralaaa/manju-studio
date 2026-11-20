@@ -210,7 +210,10 @@ func coverTask(p *Project, e *Episode, title string) (int64, error) {
 	}
 	gist := strings.TrimRight(strings.TrimSpace(orDefault(e.Summary, orDefault(e.Idea, p.Idea))), "。.！!？?；;，, ")
 	prompt := fmt.Sprintf("竖屏短剧海报封面。画面风格：%s。主视觉：%s。画面上方用醒目的中文艺术字写出标题「%s」，标题下方用较小的字写「%s」，文字清晰、无错别字、不出现其他文字，标题只在画面上方出现一次，画中的信纸、招牌等物件上不写字。电影海报级构图与光影，人物情绪强烈。",
-		orDefault(p.Style, "精致国漫"), gist, title, sub)
+		styleOr(p, "精致国漫"), gist, title, sub)
+	if isRealistic(p) {
+		prompt += realTail + "。"
+	}
 	if l := lookLine(p, lead); l != "" {
 		prompt += l + "。"
 	}

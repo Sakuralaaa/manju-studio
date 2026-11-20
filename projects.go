@@ -209,7 +209,7 @@ func scriptTask(p *Project, e *Episode, note string) (int64, error) {
 		user += "\n这是上一版剧本，请在它的基础上按额外要求修改：\n" + e.Script
 	}
 	return startTask(p.ID, e.ID, "script", "episode", e.ID, func(ctx context.Context) error {
-		text, err := callChatL(ctx, p.ID, e.ID, ch, model, scriptSystem, user, 0.9)
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, sysFor(p, scriptSystem), user, 0.9)
 		if err != nil {
 			return err
 		}
@@ -276,7 +276,7 @@ func extractTask(p *Project, e *Episode) (int64, error) {
 	}
 	user := "画面风格：" + orDefault(p.Style, "不限") + "\n\n人物小传：\n" + orDefault(p.Bios, "（无）") + "\n\n资产库已有：" + orDefault(strings.Join(names, "、"), "（空）") + "\n\n本集剧本：\n" + e.Script
 	return startTask(p.ID, e.ID, "extract", "project", p.ID, func(ctx context.Context) error {
-		text, err := callChatL(ctx, p.ID, e.ID, ch, model, extractSystem, user, 0.4)
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, sysFor(p, extractSystem), user, 0.4)
 		if err != nil {
 			return err
 		}
@@ -447,6 +447,9 @@ func assetPrompt(p *Project, a *Asset, tag string) string {
 		parts = append(parts, "画面风格："+s)
 	}
 	if f := lookFrame[tag]; f != "" {
+		if tag == "sheet" && isRealistic(p) {
+			f += "；" + realSheetExtra
+		}
 		parts = append(parts, f, body)
 	} else {
 		parts = append(parts, assetFrame[a.Kind], body)
@@ -458,6 +461,9 @@ func assetPrompt(p *Project, a *Asset, tag string) string {
 	}
 	if notes := assetRefNotes(a, tag); len(notes) > 0 {
 		parts = append(parts, strings.Join(notes, "，")+"；脸、发型、服装必须与参考图完全一致")
+	}
+	if isRealistic(p) {
+		parts = append(parts, realTail)
 	}
 	return strings.Join(parts, "。")
 }
@@ -698,7 +704,7 @@ func splitTask(p *Project, e *Episode) (int64, error) {
 	user := fmt.Sprintf("目标镜头数：%d\n单集时长：约 %d 秒\n画幅：%s\n画面风格：%s\n\n资产表（编号｜类型｜名称｜外观）：\n%s\n剧本：\n%s",
 		p.ShotTarget, p.EpisodeSec, p.Aspect, orDefault(p.Style, "不限"), orDefault(assetTable(assets), "（暂无）\n"), e.Script)
 	return startTask(p.ID, e.ID, "storyboard", "episode", e.ID, func(ctx context.Context) error {
-		text, err := callChatL(ctx, p.ID, e.ID, ch, model, storyboardSystem, user, 0.5)
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, sysFor(p, storyboardSystem), user, 0.5)
 		if err != nil {
 			return err
 		}
@@ -1023,6 +1029,9 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 	}
 	if len(notes) > 0 {
 		parts = append(parts, strings.Join(notes, "，")+"；保持角色的脸、发型和服装与参考图一致，场景沿用参考图的空间与色调")
+	}
+	if isRealistic(p) {
+		parts = append(parts, realTail)
 	}
 	parts = append(parts, "电影感单帧画面，无字幕，无文字")
 	return strings.Join(parts, "。"), refs, picks

@@ -4,7 +4,7 @@ import { api } from '../../api'
 import { useProject, StepHead, Cost } from '../Project'
 import { useStore } from '../../store'
 import { Segmented, Select, Spinner, Stepper } from '../../components/ui'
-import { styleChips } from '../Projects'
+import { StylePicker, kindOptions, animeStyles, realStyles } from '../Projects'
 import { VoiceButton } from './Voice'
 
 export default function Setup() {
@@ -49,9 +49,15 @@ export default function Setup() {
           <label className="field"><span className="field-label">整体创意</span>
             <textarea className="input" rows={3} value={f.idea} onChange={x => setF({ ...f, idea: x.target.value })} onBlur={() => save('idea', f.idea)} />
           </label>
-          <div className="field"><span className="field-label">画面风格</span>
-            <input className="input" value={f.style} onChange={x => setF({ ...f, style: x.target.value })} onBlur={() => save('style', f.style)} placeholder="自由描述，或点下面的常用风格" />
-            <div className="chips">{styleChips.map(s => <button key={s} type="button" className={`chip ${f.style === s ? 'is-on' : ''}`} onClick={() => { setF({ ...f, style: s }); save('style', s) }}>{s}</button>)}</div>
+          <div className="field"><span className="field-label">作品类型</span>
+            <Segmented value={f.kind || 'manju'} options={kindOptions} onChange={v => {
+              const st = v === 'live' && (!f.style || animeStyles.includes(f.style)) ? realStyles[0] : f.style
+              setF({ ...f, kind: v, style: st }); patch({ kind: v, style: st } as any)
+            }} />
+            <span className="field-hint muted">漫剧也能选真人风画面，就是仿真人漫剧；真人剧的编剧和分镜按真人短剧来写。</span>
+          </div>
+          <div className="field" onBlur={() => save('style', f.style)}><span className="field-label">画面风格</span>
+            <StylePicker value={f.style} onChange={v => setF({ ...f, style: v })} onPick={s => save('style', s)} />
           </div>
         </div>
         <div className="stack">

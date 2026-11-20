@@ -340,7 +340,7 @@ func renderScript(a scriptArgs) (string, []string, error) {
 		return "", nil, errors.New("scenes 至少一场")
 	}
 	if strings.TrimSpace(a.Cliffhanger) == "" {
-		return "", nil, errors.New("cliffhanger 不能为空：漫剧每集结尾必须停在悬念上")
+		return "", nil, errors.New("cliffhanger 不能为空：每集结尾必须停在悬念上")
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", title)
@@ -401,7 +401,7 @@ func renderScript(a scriptArgs) (string, []string, error) {
 				return "", nil, fmt.Errorf("第 %d 场第 %d 条台词缺 speaker", i+1, j+1)
 			}
 			if n := runeLen(txt); n > 20 {
-				warn = append(warn, fmt.Sprintf("第 %d 场「%s」的台词 %d 字，漫剧建议一句不超过 20 字", i+1, sp, n))
+				warn = append(warn, fmt.Sprintf("第 %d 场「%s」的台词 %d 字，短剧台词建议一句不超过 20 字", i+1, sp, n))
 			}
 			if emo != "" {
 				fmt.Fprintf(&b, "%s：（%s）%s\n", sp, emo, txt)
@@ -456,7 +456,7 @@ func toolSaveScript(ctx context.Context, raw json.RawMessage) (any, error) {
 		}
 		for _, pl := range parseDialogue(strings.Join(dialogueLinesOf(md), "\n")) {
 			if runeLen(pl.text) > 20 {
-				warn = append(warn, fmt.Sprintf("「%s」的台词 %d 字，漫剧建议一句不超过 20 字", pl.speaker, runeLen(pl.text)))
+				warn = append(warn, fmt.Sprintf("「%s」的台词 %d 字，短剧台词建议一句不超过 20 字", pl.speaker, runeLen(pl.text)))
 			}
 		}
 		text = md + "\n"
@@ -1025,7 +1025,7 @@ func toolWritingContext(ctx context.Context, raw json.RawMessage) (any, error) {
 		}
 	}
 	out := map[string]any{
-		"project": map[string]any{"project_id": p.ID, "title": p.Title, "idea": p.Idea, "style": p.Style, "aspect": p.Aspect, "episode_seconds": p.EpisodeSec,
+		"project": map[string]any{"project_id": p.ID, "title": p.Title, "idea": p.Idea, "style": p.Style, "kind": p.Kind, "aspect": p.Aspect, "episode_seconds": p.EpisodeSec,
 			"shot_target": p.ShotTarget, "episodes_plan": p.EpisodesPlan, "audio_mode": p.AudioMode},
 		"bible":             map[string]any{"world": p.World, "bios": p.Bios, "outline": p.Outline},
 		"assets":            assets,

@@ -19,6 +19,7 @@ type Project struct {
 	Title          string    `json:"title"`
 	Idea           string    `json:"idea"`
 	Style          string    `json:"style"`
+	Kind           string    `json:"kind"`
 	Aspect         string    `json:"aspect"`
 	EpisodeSec     int       `json:"episode_sec"`
 	ShotTarget     int       `json:"shot_target"`
@@ -45,14 +46,14 @@ type Project struct {
 	UpdatedAt      int64     `json:"updated_at"`
 }
 
-const projCols = `id,title,idea,style,aspect,episode_sec,shot_target,text_channel_id,text_model,image_channel_id,image_model,video_sec,video_res,video_turbo,world,bios,outline,episodes_plan,audio_mode,orig_volume,takes,narrator_voice,voice_channel_id,deliver,post_upscale,post_interp,created_at,updated_at`
+const projCols = `id,title,idea,style,aspect,episode_sec,shot_target,text_channel_id,text_model,image_channel_id,image_model,video_sec,video_res,video_turbo,world,bios,outline,episodes_plan,audio_mode,orig_volume,takes,narrator_voice,voice_channel_id,deliver,post_upscale,post_interp,kind,created_at,updated_at`
 
 func scanProject(sc interface{ Scan(...any) error }) (*Project, error) {
 	var p Project
 	var turbo, up, interp int
 	var nv string
 	if err := sc.Scan(&p.ID, &p.Title, &p.Idea, &p.Style, &p.Aspect, &p.EpisodeSec, &p.ShotTarget, &p.TextChannelID, &p.TextModel, &p.ImageChannelID, &p.ImageModel, &p.VideoSec, &p.VideoRes, &turbo,
-		&p.World, &p.Bios, &p.Outline, &p.EpisodesPlan, &p.AudioMode, &p.OrigVolume, &p.Takes, &nv, &p.VoiceChannelID, &p.Deliver, &up, &interp, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.World, &p.Bios, &p.Outline, &p.EpisodesPlan, &p.AudioMode, &p.OrigVolume, &p.Takes, &nv, &p.VoiceChannelID, &p.Deliver, &up, &interp, &p.Kind, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	p.VideoTurbo, p.PostUpscale, p.PostInterp = turbo == 1, up == 1, interp == 1
@@ -305,6 +306,7 @@ type projectIn struct {
 	Title          *string    `json:"title"`
 	Idea           *string    `json:"idea"`
 	Style          *string    `json:"style"`
+	Kind           *string    `json:"kind"`
 	Aspect         *string    `json:"aspect"`
 	EpisodeSec     *int       `json:"episode_sec"`
 	ShotTarget     *int       `json:"shot_target"`
@@ -367,6 +369,9 @@ func applyProject(id int64, in projectIn) error {
 	}
 	str("idea", in.Idea)
 	str("style", in.Style)
+	if in.Kind != nil {
+		set("kind", normKind(*in.Kind))
+	}
 	str("world", in.World)
 	str("bios", in.Bios)
 	str("outline", in.Outline)
@@ -724,7 +729,7 @@ func handleBibleGenerate(w http.ResponseWriter, r *http.Request) {
 		user += "\n额外要求：" + strings.TrimSpace(in.Note)
 	}
 	tid, err := startTask(p.ID, 0, "bible", "project", p.ID, func(ctx context.Context) error {
-		text, err := callChatL(ctx, p.ID, 0, ch, model, bibleSystem, user, 0.8)
+		text, err := callChatL(ctx, p.ID, 0, ch, model, sysFor(p, bibleSystem), user, 0.8)
 		if err != nil {
 			return err
 		}
@@ -821,7 +826,7 @@ func episodeIdeaTask(p *Project, e *Episode) (int64, error) {
 	}
 	user := fmt.Sprintf("剧名：%s\n故事创意：%s\n现在要写第 %d 集。\n\n%s", p.Title, p.Idea, e.No, seriesContext(p, e))
 	return startTask(p.ID, e.ID, "idea", "episode", e.ID, func(ctx context.Context) error {
-		text, err := callChatL(ctx, p.ID, e.ID, ch, model, ideaSystem, user, 0.8)
+		text, err := callChatL(ctx, p.ID, e.ID, ch, model, sysFor(p, ideaSystem), user, 0.8)
 		if err != nil {
 			return err
 		}

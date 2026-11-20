@@ -179,6 +179,9 @@ func shotVideoPrompt(p *Project, s *Shot) string {
 	if st := strings.TrimSpace(p.Style); st != "" {
 		parts = append(parts, st+"风格")
 	}
+	if isRealistic(p) {
+		parts = append(parts, realVideoTail)
+	}
 	if s.Camera != "" {
 		parts = append(parts, "镜头："+s.Camera)
 	}

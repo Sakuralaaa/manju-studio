@@ -16,7 +16,26 @@ export function PageHead({ title, sub, children }: { title: ReactNode; sub?: Rea
   )
 }
 
-export const styleChips = ['日系赛璐璐', '国漫厚涂', '韩漫精致', '3D 卡通', '水墨国风', '美式漫画', '赛博朋克', '暗黑哥特']
+export const animeStyles = ['日系赛璐璐', '国漫厚涂', '韩漫精致', '3D 卡通', '水墨国风', '美式漫画', '赛博朋克', '暗黑哥特']
+export const realStyles = ['电影感真人写实', '仿真人超写实', '都市职场写实', '古装影视写实', '港风复古胶片', '韩剧唯美写实', '悬疑冷调写实']
+export const kindOptions = [{ value: 'manju', label: '漫剧' }, { value: 'live', label: '真人剧' }]
+
+// StylePicker 画面风格：自由填写，或点动漫风 / 真人风里的常用风格
+export function StylePicker({ value, onChange, onPick }: { value: string; onChange: (v: string) => void; onPick?: (v: string) => void }) {
+  const pick = (s: string) => { onChange(s); onPick?.(s) }
+  const group = (label: string, list: string[]) => (
+    <div className="style-group"><span className="style-group-label">{label}</span>
+      <div className="chips">{list.map(s => <button key={s} type="button" className={`chip ${value === s ? 'is-on' : ''}`} onClick={() => pick(s)}>{s}</button>)}</div>
+    </div>
+  )
+  return (
+    <>
+      <input className="input" value={value} onChange={e => onChange(e.target.value)} placeholder="自由描述，或点下面的常用风格" />
+      {group('动漫风', animeStyles)}
+      {group('真人风', realStyles)}
+    </>
+  )
+}
 
 export default function Projects() {
   const { go } = useStore()
@@ -70,12 +89,13 @@ function CreateProject({ onClose }: { onClose: () => void }) {
   const [title, setTitle] = useState('')
   const [idea, setIdea] = useState('')
   const [style, setStyle] = useState('')
+  const [kind, setKind] = useState('manju')
   const [aspect, setAspect] = useState('9:16')
   const [busy, setBusy] = useState(false)
   const create = async () => {
     setBusy(true)
     try {
-      const p = await api<{ id: number }>('/api/projects', { body: { title, idea, style, aspect } })
+      const p = await api<{ id: number }>('/api/projects', { body: { title, idea, style, aspect, kind } })
       go({ page: 'series', id: p.id, tab: 'bible' })
     } catch (e: any) { toast(e.message, 'err'); setBusy(false) }
   }
@@ -84,9 +104,12 @@ function CreateProject({ onClose }: { onClose: () => void }) {
       footer={<><button className="btn btn-secondary" onClick={onClose}>取消</button><button className="btn btn-primary" disabled={busy || !title.trim()} onClick={create}>{busy && <Spinner />}创建</button></>}>
       <label className="field"><span className="field-label">剧名</span><input className="input" autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="例如：重生之我在天台等你" /></label>
       <label className="field"><span className="field-label">故事创意</span><textarea className="input" rows={4} value={idea} onChange={e => setIdea(e.target.value)} placeholder="一两句话：谁，想要什么，遇到了什么反转" /></label>
+      <div className="field"><span className="field-label">作品类型</span>
+        <Segmented value={kind} onChange={v => { setKind(v); if (v === 'live' && (!style || animeStyles.includes(style))) setStyle(realStyles[0]) }} options={kindOptions} />
+        <span className="field-hint muted">漫剧也能选真人风画面，就是仿真人漫剧；真人剧的编剧和分镜按真人短剧来写。</span>
+      </div>
       <div className="field"><span className="field-label">画面风格</span>
-        <input className="input" value={style} onChange={e => setStyle(e.target.value)} placeholder="自由描述，或点下面的常用风格" />
-        <div className="chips">{styleChips.map(s => <button key={s} type="button" className={`chip ${style === s ? 'is-on' : ''}`} onClick={() => setStyle(s)}>{s}</button>)}</div>
+        <StylePicker value={style} onChange={setStyle} />
       </div>
       <div className="field"><span className="field-label">画幅</span>
         <Segmented value={aspect} onChange={setAspect} options={[{ value: '9:16', label: '竖屏 9:16', glyph: '9:16' }, { value: '16:9', label: '横屏 16:9', glyph: '16:9' }, { value: '1:1', label: '方形 1:1', glyph: '1:1' }]} />

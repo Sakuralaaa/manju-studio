@@ -26,7 +26,7 @@ export interface VoiceSpec {
   sample?: string; sample_text?: string; cover?: string; preview?: string; speed?: number; pitch?: number; style?: string
 }
 export interface Project {
-  id: number; title: string; idea: string; style: string; aspect: string; episode_sec: number; shot_target: number
+  id: number; title: string; idea: string; style: string; kind: string; aspect: string; episode_sec: number; shot_target: number
   text_channel_id: number; text_model: string; image_channel_id: number; image_model: string
   video_sec: number; video_res: string; video_turbo: boolean
   world: string; bios: string; outline: string; episodes_plan: number; audio_mode: 'native' | 'dub'; orig_volume: number; takes: number

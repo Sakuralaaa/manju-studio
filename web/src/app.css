@@ -6,6 +6,9 @@
 .loading { min-height: 160px; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--text-3); }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.field-hint { font-size: 12px; line-height: 18px; }
+.style-group { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.style-group-label { font-size: 12px; line-height: 16px; color: var(--text-3); }
 .muted { color: var(--text-3); }
 .sm-text { font-size: 13px; }
 .accent-text { color: var(--accent-text); }

@@ -100,6 +100,7 @@ var addCols = []struct{ table, col, def string }{
 	{"projects", "deliver", "TEXT NOT NULL DEFAULT 'source'"},
 	{"projects", "post_upscale", "INTEGER NOT NULL DEFAULT 0"},
 	{"projects", "post_interp", "INTEGER NOT NULL DEFAULT 0"},
+	{"projects", "kind", "TEXT NOT NULL DEFAULT 'manju'"},
 	{"assets", "sheet_image_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"assets", "expr_image_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"assets", "voice", "TEXT NOT NULL DEFAULT '{}'"},
@@ -155,10 +156,10 @@ func migrate() error {
 		return err
 	}
 	type old struct {
-		id            int64
-		idea, script  string
-		final         string
-		finalAt       int64
+		id           int64
+		idea, script string
+		final        string
+		finalAt      int64
 	}
 	var olds []old
 	for rows.Next() {
