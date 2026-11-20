@@ -133,12 +133,13 @@ func charLook(p *Project, a *Asset) string {
 		}
 	}
 	add(appearanceSentences(a.Description, a.Name))
-	if p != nil {
+	// 资产描述是定稿：写了造型就不再掺人物小传（小传里多半是旧造型，会把换过的服装拉回去）
+	if p != nil && !(hasAny(strings.Join(parts, ""), "发") && hasAny(strings.Join(parts, ""), "穿", "衣", "装", "衫", "裤")) {
 		add(appearanceSentences(biosParagraph(p.Bios, a.Name), a.Name))
 	}
 	look := strings.Join(parts, "，")
-	if r := []rune(look); len(r) > 160 {
-		look = string(r[:160])
+	if r := []rune(look); len(r) > 320 {
+		look = string(r[:320])
 	}
 	return look
 }
@@ -150,4 +151,13 @@ func lookLine(p *Project, a *Asset) string {
 		return ""
 	}
 	return fmt.Sprintf("「%s」的固定造型：%s（发型、服装、配饰必须严格照此，不要改变）", a.Name, look)
+}
+
+func hasAny(s string, keys ...string) bool {
+	for _, k := range keys {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
 }
