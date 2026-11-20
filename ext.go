@@ -837,7 +837,7 @@ var mcpTools = []mcpTool{
 	})},
 	{"set_voice", "把 design_voice 的一个候选设为角色（或旁白）的音色；用 Fish 时会在 Fish 建一个私有音色。也可以直接给 voice 对象。之后配音都用它。", obj(map[string]any{
 		"asset_id": num("角色资产编号"), "project_id": num("作品编号（设旁白时填，且不填 asset_id）"), "sample": str("design_voice 返回的样本名"), "channel_id": num("design_voice 返回的渠道编号"),
-		"description": str("这段音色的描述（记下来以后改用）"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
+		"description": str("这段音色的描述（记下来以后改用）"), "synth_channel_id": num("配音用哪个渠道（可选）：设计用 MiMo、配音交给 Fish 时填 Fish 渠道编号；只填这个不填 sample = 把已选音色换到这个渠道配音"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
 	})},
 	{"list_image_channels", "列出生图渠道：渠道编号、可用模型、参考图上限。指定渠道和模型出图前先看这个。", obj(map[string]any{})},
 	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。", obj(map[string]any{
@@ -1170,6 +1170,7 @@ type voiceToolArgs struct {
 	ChannelID   int64      `json:"channel_id"`
 	Sample      string     `json:"sample"`
 	Voice       *VoiceSpec `json:"voice"`
+	SynthCh     int64      `json:"synth_channel_id"`
 }
 
 func toolDesignVoice(ctx context.Context, a voiceToolArgs, base string) (any, error) {
@@ -1239,6 +1240,16 @@ func toolSetVoice(ctx context.Context, a voiceToolArgs) (any, error) {
 	var v VoiceSpec
 	if a.Voice != nil {
 		v = *a.Voice
+	} else if strings.TrimSpace(a.Sample) == "" && a.SynthCh > 0 {
+		// 只换配音渠道：沿用已选的设计 / 克隆样本
+		if as != nil {
+			v = as.Voice
+		} else {
+			v = p.NarratorVoice
+		}
+		if v.Sample == "" {
+			return nil, errors.New("当前音色不是设计或克隆出来的样本，不能换配音渠道")
+		}
 	} else {
 		if strings.TrimSpace(a.Sample) == "" || strings.ContainsAny(a.Sample, "/\\") {
 			return nil, errors.New("需要 design_voice 返回的 sample")
@@ -1265,6 +1276,24 @@ func toolSetVoice(ctx context.Context, a voiceToolArgs) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	if a.SynthCh > 0 && v.Sample != "" {
+		sc, err := voiceChannel(a.SynthCh)
+		if err != nil || (sc.APIType != "mimo" && sc.APIType != "fish") {
+			return nil, errors.New("配音渠道需要是小米 MiMo 或 Fish Audio")
+		}
+		v.ChannelID = sc.ID
+		if v.Mode == "fish" {
+			v.Mode = "design"
+		}
+		if sc.APIType == "fish" {
+			c, cancel := context.WithTimeout(ctx, 4*time.Minute)
+			defer cancel()
+			if _, err := fishModelFromSample(c, sc, v.Sample, v.Title); err != nil {
+				return nil, err
+			}
+		}
+		v.Voice = ""
 	}
 	if v.empty() {
 		return nil, errors.New("音色不完整")

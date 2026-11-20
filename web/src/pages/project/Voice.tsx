@@ -91,10 +91,10 @@ export function VoicePanel({ value, name, assetId, onClose, onSave }: { value: V
   )
 }
 
-function ChannelPick({ chs, value, onChange }: { chs: Channel[]; value?: number; onChange: (id: number) => void }) {
+function ChannelPick({ chs, value, onChange, label = '语音渠道' }: { chs: Channel[]; value?: number; onChange: (id: number) => void; label?: string }) {
   if (chs.length <= 1) return null
   return (
-    <div className="field"><span className="field-label">语音渠道</span>
+    <div className="field"><span className="field-label">{label}</span>
       <Select value={String(value || chs[0].id)} onChange={x => onChange(Number(x))} options={chs.map(c => ({ value: String(c.id), label: c.name }))} />
     </div>
   )
@@ -119,7 +119,7 @@ function DesignTab({ chs, name, assetId, v, setV, text, setText }: { chs: Channe
   }
   return (
     <div className="stack">
-      <ChannelPick chs={chs} value={ch} onChange={setCh} />
+      <ChannelPick label="设计用" chs={chs} value={ch} onChange={setCh} />
       <div className="field"><span className="field-label">音色描述</span>
         <div className={`desc-wrap ${drafting ? 'is-busy' : ''}`}>
           <textarea className="input" rows={3} value={desc} onChange={e => setDesc(e.target.value)} placeholder="性别、年龄感、音色质感、语速、性格、口音" />
@@ -145,6 +145,9 @@ function DesignTab({ chs, name, assetId, v, setV, text, setText }: { chs: Channe
             )
           })}
         </div>
+      )}
+      {v.mode === 'design' && v.sample && chs.length > 1 && (
+        <ChannelPick label="念台词用" chs={chs} value={v.channel_id} onChange={id => setV({ ...v, channel_id: id, voice: '' })} />
       )}
     </div>
   )
