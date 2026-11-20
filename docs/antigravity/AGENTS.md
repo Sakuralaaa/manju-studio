@@ -39,6 +39,8 @@
 - 要指定渠道和模型，先 `list_image_channels`，再在 `generate_asset_image` / `generate_keyframe` / `image_generate` 里传 `channel_id` 和 `model`。
 - `image_generate` 生成的图会放进应用的「画室」，用户能直接看；可用 `ref_image_ids`（`view_asset_images` 会标出每张图的编号）带参考图。需要放进作品时用 `attach_image` 存到资产：设定图 / 三视图 / 表情表 / 参考照（tag=ref，以后出图锁脸用）。
 - 某个镜头需要特定构图、姿势或道具时，在 `generate_keyframe` 里传 `ref_image_ids`（会保存在镜头上）；人物的脸不用另外给，按角色资产自动带。
+- 用户说「拿这张当参考出一张」：先 `view_asset_images`（which 含 `candidates`）找到那张图的编号，再 `generate_asset_image` 传 `face_image_ids=[编号]`（只用它锁脸）和 `extra_prompt`（年龄、服装等这次的要求）。用户在对话里直接发的图，用 `upload_image` 传进来拿编号；拿不到图片数据就请用户在网页资产卡片的「参考」页上传。
+- 换定稿用 `pick_image`，不要让用户去网页点。
 - 出图会花用户的生图额度：先出 1 张看效果，用户满意再多出。
 
 ## 分镜要求

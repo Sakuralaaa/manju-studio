@@ -47,9 +47,9 @@ func sessionOverhead() map[[2]int64]float64 {
 		return out
 	}
 	type sess struct {
-		id      int64
-		acc     string
-		st, en  int64
+		id     int64
+		acc    string
+		st, en int64
 	}
 	var ss []sess
 	for rows.Next() {

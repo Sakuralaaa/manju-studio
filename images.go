@@ -311,19 +311,31 @@ func handleImagePick(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "图片不存在")
 		return
 	}
+	if err := pickImage(im); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// pickImage 把图设为它所在位置（资产的设定图 / 三视图 / 表情表、镜头关键帧、封面）的选用图
+func pickImage(im *Image) error {
 	switch im.OwnerType {
 	case "asset":
 		col := map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}[im.Tag]
-		if col != "" {
-			_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=?`, im.ID, im.OwnerID)
+		if col == "" {
+			return errors.New("参考照不用选用，它会自动用于出图")
 		}
+		_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=?`, im.ID, im.OwnerID)
 	case "shot":
 		_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im.ID, im.OwnerID)
 	case "cover":
 		_, _ = db.Exec(`UPDATE episodes SET cover_image_id=? WHERE id=?`, im.ID, im.OwnerID)
+	default:
+		return errors.New("画室里的图不能直接选用：先用 attach_image 存进资产")
 	}
 	touchProject(im.ProjectID)
-	writeJSON(w, map[string]any{"ok": true})
+	return nil
 }
 
 func handleImageDelete(w http.ResponseWriter, r *http.Request) {

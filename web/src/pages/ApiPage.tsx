@@ -37,6 +37,8 @@ const tools: [string, string][] = [
   ['image_generate', '自由出图（放进画室，可带参考图、指定模型）'],
   ['generate_asset_image', '给角色 / 场景出图（自动带参考图锁脸）'],
   ['generate_keyframe', '给镜头出关键帧（可指定模型）'],
+  ['pick_image', '换选用（定稿）'],
+  ['upload_image', '上传图片（用户在对话里发的图）'],
   ['attach_image', '把图存进资产（设定图 / 三视图 / 表情表 / 参考照）'],
 ]
 

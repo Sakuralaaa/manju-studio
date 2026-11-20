@@ -267,3 +267,27 @@ func handleRefLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, out)
 }
+
+// decodeB64Image 解析 base64 或 data URL 图片
+func decodeB64Image(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if i := strings.Index(s, ","); strings.HasPrefix(s, "data:") && i > 0 {
+		s = s[i+1:]
+	}
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' {
+			return -1
+		}
+		return r
+	}, s)
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		if data, err = base64.RawStdEncoding.DecodeString(s); err != nil {
+			return nil, errors.New("图片不是有效的 base64")
+		}
+	}
+	if len(data) < 100 {
+		return nil, errors.New("图片数据太小")
+	}
+	return data, nil
+}

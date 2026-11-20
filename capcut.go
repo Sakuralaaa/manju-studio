@@ -60,7 +60,7 @@ func (d *jyDraft) videoMat(path, name string, dur float64, w, h int) string {
 	id := jyID()
 	d.materials["videos"] = append(d.materials["videos"], map[string]any{
 		"audio_fade": nil, "category_id": "", "category_name": "local", "check_flag": 63487,
-		"crop": map[string]any{"upper_left_x": 0.0, "upper_left_y": 0.0, "upper_right_x": 1.0, "upper_right_y": 0.0, "lower_left_x": 0.0, "lower_left_y": 1.0, "lower_right_x": 1.0, "lower_right_y": 1.0},
+		"crop":       map[string]any{"upper_left_x": 0.0, "upper_left_y": 0.0, "upper_right_x": 1.0, "upper_right_y": 0.0, "lower_left_x": 0.0, "lower_left_y": 1.0, "lower_right_x": 1.0, "lower_right_y": 1.0},
 		"crop_ratio": "free", "crop_scale": 1.0, "duration": us(dur), "height": h, "id": id, "local_material_id": "", "material_id": id,
 		"material_name": name, "media_path": "", "path": path, "type": "video", "width": w,
 	})

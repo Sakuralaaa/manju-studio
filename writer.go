@@ -1177,12 +1177,15 @@ func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, errors.New("需要 asset_id，或 project_id + name（名称或编号）")
 	}
 	p, _ := getProject(as.ProjectID)
+	if len(as.Images) == 0 {
+		as.Images = listImages(`WHERE owner_type='asset' AND owner_id=? ORDER BY id`, as.ID)
+	}
 	which := a.Which
 	if len(which) == 0 {
 		which = []string{"main", "sheet", "expressions", "refs"}
 	}
-	labels := map[string]string{"main": "设定图", "sheet": "三视图", "expressions": "表情表", "refs": "参考照"}
-	ids := map[string]int64{"main": as.PickedImageID, "sheet": as.SheetImageID, "expressions": as.ExprImageID, "refs": 0}
+	labels := map[string]string{"main": "设定图（选用）", "sheet": "三视图（选用）", "expressions": "表情表（选用）", "refs": "参考照", "candidates": "候选（未选用）"}
+	ids := map[string]int64{"main": as.PickedImageID, "sheet": as.SheetImageID, "expressions": as.ExprImageID, "refs": 0, "candidates": 0}
 	var refIDs []int64
 	for _, im := range as.Images {
 		if im.Tag == "ref" {
@@ -1194,11 +1197,19 @@ func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 	for _, w := range which {
 		id, ok := ids[w]
 		if !ok {
-			return nil, errors.New("which 只能包含 main / sheet / expressions / refs")
+			return nil, errors.New("which 只能包含 main / sheet / expressions / refs / candidates")
 		}
 		list := []int64{id}
 		if w == "refs" {
 			list = refIDs
+		}
+		if w == "candidates" {
+			list = nil
+			for _, im := range as.Images {
+				if im.Tag != "ref" && im.ID != as.PickedImageID && im.ID != as.SheetImageID && im.ID != as.ExprImageID && len(list) < 8 {
+					list = append(list, im.ID)
+				}
+			}
 		}
 		for _, id := range list {
 			if id == 0 {
@@ -1217,8 +1228,26 @@ func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 	if l, _ := info["fixed_look"].(string); l != "" {
 		head += "\n固定造型：" + l
 	}
-	if len(shown) == 0 {
+	if len(shown) == 0 && len(as.Images) == 0 {
 		head += "\n这个资产还没有生成图片。"
+	}
+	if len(as.Images) > 0 {
+		picked := map[int64]bool{as.PickedImageID: true, as.SheetImageID: true, as.ExprImageID: true}
+		groups := map[string][]string{}
+		for _, im := range as.Images {
+			t := fmt.Sprintf("%d", im.ID)
+			if picked[im.ID] {
+				t += "（选用）"
+			}
+			groups[im.Tag] = append(groups[im.Tag], t)
+		}
+		head += "\n全部图片编号："
+		for _, t := range []string{"", "sheet", "expr", "ref"} {
+			if len(groups[t]) > 0 {
+				head += fmt.Sprintf("%s %s；", map[string]string{"": "设定图", "sheet": "三视图", "expr": "表情表", "ref": "参考照"}[t], strings.Join(groups[t], "、"))
+			}
+		}
+		head += "没选用的候选用 which=[\"candidates\"] 看，用 pick_image 换选用。"
 	}
 	return &mcpRich{Blocks: append([]any{textBlock(head)}, blocks...), Structured: map[string]any{"asset": info, "images": shown}}, nil
 }
@@ -1599,9 +1628,9 @@ var writerTools = []mcpTool{
 		"voice_sample_text": str("试音台词（可选）"),
 		"base_code":         str("同一个人的另一个时期 / 另一套造型时，填本体角色的编号（如 C01）：出图时拿本体的图锁脸，发型服装按这个角色自己的 look。名字写成「阿策（千禧年）」且已有「阿策」时会自动挂上；填空字符串取消"),
 	}, "project_id")},
-	{"view_asset_images", "看资产的图片：设定图、三视图、表情表、参考照，每张都标出图片编号（可用作 image_generate 的参考图）。返回图片内容块（默认缩到长边 1536 像素的 JPEG；original=true 返回原图）。", obj(map[string]any{
+	{"view_asset_images", "看资产的图片：选用的设定图、三视图、表情表、参考照，以及（which 含 candidates 时）没选用的候选图，每张都标出图片编号；文字里列出全部图片编号和哪张是选用（可用作 image_generate 的参考图）。返回图片内容块（默认缩到长边 1536 像素的 JPEG；original=true 返回原图）。", obj(map[string]any{
 		"asset_id": num("资产编号"), "project_id": num("作品编号（与 name 一起用）"), "name": str("资产名称或编号"),
-		"which":    arr("要看哪些，默认全部", map[string]any{"type": "string", "enum": []string{"main", "sheet", "expressions", "refs"}}),
+		"which":    arr("要看哪些，默认选用的设定图、三视图、表情表和参考照；candidates = 没选用的候选图（最多 8 张）", map[string]any{"type": "string", "enum": []string{"main", "sheet", "expressions", "refs", "candidates"}}),
 		"original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，256–4096，默认 1536"),
 	})},
 	{"view_shot", "看一个镜头：文字信息 + 关键帧图片 + 选定视频的第一帧和最后一帧（图片内容块）。完整视频用 get_video_link。", obj(map[string]any{

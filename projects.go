@@ -685,6 +685,16 @@ func genAssetTask(p *Project, a *Asset, n int, tag string, ov ...imgOverride) (i
 			a = x
 		}
 		all := assetRefs(a, tag)
+		var o imgOverride
+		if len(ov) > 0 {
+			o = ov[0]
+		}
+		if len(o.FaceIDs) > 0 {
+			all = nil
+			for _, id := range o.FaceIDs {
+				all = append(all, assetRef{ID: id, Kind: "face", Note: "参考照"})
+			}
+		}
 		if lim := refLimit(ch); len(all) > lim {
 			all = all[:lim]
 		}
@@ -699,6 +709,12 @@ func genAssetTask(p *Project, a *Asset, n int, tag string, ov ...imgOverride) (i
 			}
 		}
 		prompt := assetPromptWith(p, a, tag, kept)
+		if len(o.FaceIDs) > 0 && !strings.Contains(prompt, "参考图1") && len(kept) > 0 {
+			prompt = strings.TrimRight(prompt, "。") + "。" + refNotesFor(a, kept)
+		}
+		if x := strings.TrimSpace(o.Extra); x != "" {
+			prompt = strings.TrimRight(prompt, "。") + "。这一次的要求：" + x
+		}
 		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
 		ledgerAdd(p.ID, 0, "image", len(imgs), 0, 0, 0, "")
 		if err != nil {
@@ -757,8 +773,10 @@ func assetPromptWith(p *Project, a *Asset, tag string, refs []assetRef) string {
 
 // imgOverride 单次出图指定渠道和模型（界面下拉 / 智能体参数）
 type imgOverride struct {
-	ChannelID int64  `json:"channel_id"`
-	Model     string `json:"model"`
+	ChannelID int64   `json:"channel_id"`
+	Model     string  `json:"model"`
+	FaceIDs   []int64 `json:"face_image_ids"` // 资产出图：只用这几张锁脸，不再自动带别的参考图
+	Extra     string  `json:"extra_prompt"`   // 资产出图：这一次追加的要求
 }
 
 func applyOverride(ch *Channel, model string, o imgOverride) (*Channel, string, error) {

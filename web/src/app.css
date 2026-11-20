@@ -667,3 +667,7 @@
 .cand-hint { position: absolute; inset: 0; display: grid; place-items: center; font-size: 11px; font-weight: 600; color: #fff; background: rgba(0,0,0,.45); opacity: 0; transition: opacity .15s; }
 .cand:hover .cand-hint { opacity: 1; }
 .cands-tip { margin-top: 4px; font-size: 11px; color: var(--muted); }
+/* 候选图换行，不再横向溢出 */
+.cands { display: grid; grid-template-columns: repeat(auto-fill, minmax(36px, 1fr)); gap: 6px; height: auto; overflow: visible; }
+.cand { width: auto; height: auto; aspect-ratio: 1; min-width: 0; }
+.cands-empty { grid-column: 1 / -1; }

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"encoding/base64"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
