@@ -17,16 +17,19 @@ export function Picker({ images, picked, aspect, busy, empty }: { images: Img[];
     <>
       <div className={`frame ${arClass(aspect)} ${busy ? 'is-busy' : ''}`}>
         {cur ? <img src={cur.url} alt="" loading="lazy" onClick={() => setView(cur)} /> : <div className="frame-empty">{empty}</div>}
+        {cur && images.length > 1 && <span className={`frame-badge ${cur.id === picked ? 'is-on' : ''}`}>{cur.id === picked ? <><Check size={11} />已选用</> : '未选定'}</span>}
         {busy && <div className="frame-busy"><Spinner size={18} /><span>生成中</span></div>}
       </div>
       <div className="cands" data-count={images.length}>
         {images.map(im => (
           <button key={im.id} className={`cand ${im.id === picked ? 'is-on' : ''}`} onClick={() => im.id === picked ? setView(im) : run(() => api(`/api/images/${im.id}/pick`, { method: 'POST' }))} title={im.id === picked ? '查看' : '选用这张'}>
             <img src={im.url} alt="" loading="lazy" />
+            {im.id === picked ? <i className="cand-check"><Check size={10} /></i> : <span className="cand-hint">选用</span>}
           </button>
         ))}
         {images.length === 0 && <span className="cands-empty">暂无候选</span>}
       </div>
+      {images.length > 1 && <div className="cands-tip">点小图选用，带勾的那张用于出图</div>}
       {view && <Viewer img={view} picked={view.id === picked} onClose={() => setView(null)} />}
     </>
   )
