@@ -34,7 +34,7 @@ const wfStandard = `{
   "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["7", 0], "guider": ["8", 0], "sampler": ["9", 0], "sigmas": ["10", 0], "latent_image": ["6", 1]}},
   "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
   "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
-  "14": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "audio": ["13", 0], "fps": 24}},
+  "14": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "audio": ["13", 0], "fps": "{{FPS}}"}},
   "15": {"class_type": "SaveVideo", "inputs": {"video": ["14", 0], "filename_prefix": "{{PREFIX}}", "format": "auto", "codec": "auto"}}
 }`
 
@@ -53,7 +53,7 @@ const wfTurbo = `{
   "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["7", 0], "guider": ["8", 0], "sampler": ["9", 0], "sigmas": ["10", 0], "latent_image": ["6", 1]}},
   "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
   "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
-  "14": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "audio": ["13", 0], "fps": 24}},
+  "14": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "audio": ["13", 0], "fps": "{{FPS}}"}},
   "15": {"class_type": "SaveVideo", "inputs": {"video": ["14", 0], "filename_prefix": "{{PREFIX}}", "format": "auto", "codec": "auto"}}
 }`
 
@@ -79,7 +79,7 @@ var workflowDefs = []wfDef{
 	{Key: "standard", Name: "标准工作流", Default: wfStandard, Kind: "workflow"},
 	{Key: "turbo", Name: "Turbo 工作流", Default: wfTurbo, Kind: "workflow"},
 	{Key: "files", Name: "模型文件", Default: defaultFiles, Kind: "files"},
-	{Key: "boot", Name: "运行环境", Default: `{"comfy_repo": "https://github.com/Comfy-Org/ComfyUI", "sage": true, "sage_pkg": "sageattention", "threads": 16, "extra_args": []}`, Kind: "boot"},
+	{Key: "boot", Name: "运行环境", Default: `{"comfy_repo": "https://github.com/Comfy-Org/ComfyUI", "custom_nodes": [], "fps": 24, "frame_step": 17, "frame_rem": 5, "sage": true, "sage_pkg": "sageattention", "threads": 16, "extra_args": []}`, Kind: "boot"},
 	{Key: "post", Name: "画质后期", Default: defaultPost, Kind: "boot"},
 }
 
@@ -260,11 +260,48 @@ func videoDims(aspect, res string) (int, int) {
 	return short, long
 }
 
-// framesFor 24fps，17k+5 网格
-func framesFor(sec int) int {
-	n := sec * 24
-	if n < 5 {
-		n = 5
+// frameRule 运行环境里的帧率与帧数规则：帧数取 fps×秒，再向上取到「除以 frame_step 余 frame_rem」。
+// 默认 24 帧/秒、17k+5（MiniMax H3）；换模型时按新模型的要求改，例如 4k+1 写 frame_step 4、frame_rem 1。
+type frameRule struct {
+	FPS  int `json:"fps"`
+	Step int `json:"frame_step"`
+	Rem  int `json:"frame_rem"`
+}
+
+func loadFrameRule() frameRule {
+	fr := frameRule{FPS: 24, Step: 17, Rem: 5}
+	var x struct {
+		FPS  *int `json:"fps"`
+		Step *int `json:"frame_step"`
+		Rem  *int `json:"frame_rem"`
 	}
-	return n + ((5-n%17)%17+17)%17
+	if json.Unmarshal([]byte(workflowText("boot")), &x) == nil {
+		if x.FPS != nil && *x.FPS > 0 && *x.FPS <= 120 {
+			fr.FPS = *x.FPS
+		}
+		if x.Step != nil && *x.Step >= 1 && *x.Step <= 64 {
+			fr.Step = *x.Step
+		}
+		if x.Rem != nil && *x.Rem >= 0 {
+			fr.Rem = *x.Rem % fr.Step
+		}
+	}
+	return fr
+}
+
+// framesFor 按帧数规则把秒数换成帧数
+func framesFor(sec int) int {
+	return loadFrameRule().frames(sec)
+}
+
+func (fr frameRule) frames(sec int) int {
+	n := sec * fr.FPS
+	min := fr.Rem
+	if min < 1 {
+		min = fr.Step
+	}
+	if n < min {
+		n = min
+	}
+	return n + ((fr.Rem-n%fr.Step)%fr.Step+fr.Step)%fr.Step
 }

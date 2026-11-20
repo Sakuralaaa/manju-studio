@@ -85,7 +85,7 @@ export interface ColabState {
   client: { id_tail: string; project: string } | null; authorized: boolean
   info: { tier: string; tier_label: string; specs: RuntimeSpec[]; fetched_at: number; error: string } | null
   cfg: ColabCfg; runner: RunnerView; sessions: SessionRow[]
-  drive: { enabled: boolean; scope_ok: boolean; folder: boolean; files: number; bytes: number }
+  drive: { enabled: boolean; scope_ok: boolean; folder: boolean; files: number; bytes: number; need: number; have: number }
 }
 export interface WorkflowItem { key: string; name: string; kind: 'workflow' | 'files' | 'boot'; text: string; custom: boolean }
 export interface ApiKey { id: number; name: string; tail: string; created_at: number; last_used_at: number }

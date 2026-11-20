@@ -1,5 +1,5 @@
 # 漫剧工坊：在 Colab 运行时上准备 ComfyUI + 视频模型（可重复执行）
-import os, sys, json, time, base64, subprocess, threading, urllib.request
+import os, sys, json, time, base64, subprocess, threading, urllib.request, urllib.error
 
 CFG = json.loads(base64.b64decode("__CFG__").decode())
 ROOT = "/content/ComfyUI"
@@ -74,6 +74,28 @@ def ensure_post():
             new_node = True
     return new_node
 
+def ensure_nodes():
+    """运行环境里配置的 ComfyUI 插件：git 仓库地址，装到 custom_nodes。返回是否新装了插件。"""
+    new_node = False
+    for n in CFG.get("custom_nodes") or []:
+        repo = (n if isinstance(n, str) else (n.get("repo") or "")).strip()
+        if not repo:
+            continue
+        name = repo.rstrip("/").rsplit("/", 1)[-1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        d = os.path.join(ROOT, "custom_nodes", name)
+        if os.path.exists(d):
+            continue
+        stage("安装插件 " + name)
+        sh(f"git clone --depth 1 '{repo}' '{d}'")
+        if os.path.exists(os.path.join(d, "requirements.txt")):
+            sh(f"{sys.executable} -m pip install -q -r '{d}/requirements.txt'")
+        if os.path.exists(os.path.join(d, "install.py")):
+            sh(f"cd '{d}' && {sys.executable} install.py")
+        new_node = True
+    return new_node
+
 def drive_token():
     try:
         return open(DRIVE["token_file"]).read().strip()
@@ -86,7 +108,7 @@ def drive_status_write(files):
     except Exception:
         pass
 
-def drive_upload(path, name, folder):
+def drive_upload(path, name, folder, progress=None):
     """可续传上传到云端硬盘；每个分块前重新读取令牌（应用每 10 分钟刷新一次）。"""
     size = os.path.getsize(path)
     meta = json.dumps({"name": name, "parents": [folder]}).encode()
@@ -103,11 +125,15 @@ def drive_upload(path, name, folder):
             r = urllib.request.Request(loc, data=data, method="PUT", headers={"Authorization": "Bearer " + drive_token(), "Content-Range": f"bytes {off}-{end}/{size}"})
             try:
                 resp = urllib.request.urlopen(r, timeout=300)
+                if progress:
+                    progress(size)
                 return json.load(resp).get("id")
             except urllib.error.HTTPError as e:
                 if e.code == 308:
                     rng = e.headers.get("Range")
                     off = int(rng.split("-")[1]) + 1 if rng else 0
+                    if progress:
+                        progress(off)
                     continue
                 raise
     return None
@@ -124,8 +150,117 @@ def drive_upload_all(files):
         except Exception as e:
             print("[mj] WARN 上传缓存失败", f["name"], str(e)[:200], flush=True)
 
-if comfy_alive():
-    if ensure_post():
+def file_list(base):
+    files = []
+    for f in CFG["files"]:
+        d = os.path.join(base, f["dir"])
+        os.makedirs(d, exist_ok=True)
+        name = f.get("name") or f["url"].split("?")[0].rsplit("/", 1)[-1]
+        files.append({"url": f["url"], "dir": d, "name": name, "path": os.path.join(d, name), "size": 0})
+    return files
+
+def head_size(u):
+    try:
+        req = urllib.request.Request(u, method="HEAD")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return int(r.headers.get("x-linked-size") or r.headers.get("content-length") or 0)
+    except Exception:
+        return 0
+
+def have_aria():
+    try:
+        sh("which aria2c || (apt-get -qq update && apt-get -qq install -y aria2)")
+        return True
+    except Exception:
+        return False
+
+def disk_bytes(path):
+    try:
+        return os.stat(path).st_blocks * 512
+    except Exception:
+        return 0
+
+def precache():
+    """预缓存：不装 ComfyUI，只把云端硬盘里还没有的权重下载下来、传上去、删掉本地副本。"""
+    if not DRIVE.get("enabled"):
+        raise RuntimeError("云端硬盘缓存不可用")
+    stage("核对缓存")
+    files = file_list("/content/mj_cache")
+    for f in files:
+        f["size"] = head_size(f["url"])
+    cached = DRIVE.get("files") or {}
+    todo = []
+    for f in files:
+        c = cached.get(f["name"])
+        if c and c.get("id") and (f["size"] == 0 or int(c.get("size") or 0) == f["size"]):
+            continue
+        todo.append(f)
+    say("INFO", f"模型文件 {len(files)} 个，需要缓存 {len(todo)} 个")
+    if not todo:
+        say("CACHED", "0")
+        return
+    total = sum(f["size"] for f in todo) or 1
+    stage("下载模型", 0)
+    err = {"e": None}
+
+    def dl():
+        try:
+            if have_aria():
+                lst = "/content/mj_cache_list.txt"
+                with open(lst, "w") as fh:
+                    for f in todo:
+                        fh.write(f"{f['url']}\n  dir={f['dir']}\n  out={f['name']}\n")
+                n = CFG.get("threads", 16)
+                sh(f"aria2c -q -c -x {n} -s {n} -k 4M -j {min(len(todo), 5)} --file-allocation=none --console-log-level=error --summary-interval=0 -i {lst}")
+            else:
+                import shutil
+                for f in todo:
+                    with urllib.request.urlopen(f["url"], timeout=60) as r, open(f["path"], "wb") as out:
+                        shutil.copyfileobj(r, out, 8 << 20)
+        except Exception as e:
+            err["e"] = e
+
+    th = threading.Thread(target=dl, daemon=True)
+    th.start()
+    t_dl = time.time()
+    last = 0
+    while th.is_alive():
+        time.sleep(2)
+        if time.time() - last > 10:
+            stage("下载模型", min(99.0, sum(disk_bytes(f["path"]) for f in todo) * 100.0 / total))
+            last = time.time()
+    if err["e"]:
+        raise err["e"]
+    up_total = sum(os.path.getsize(f["path"]) for f in todo) or 1
+    say("INFO", f"下载 {up_total / 1e9:.1f} GB 用时 {time.time() - t_dl:.0f}s")
+    stage("上传到云端硬盘", 0)
+    done = {}
+    sent = {"base": 0, "t": 0}
+    t_up = time.time()
+
+    def prog(off):
+        if time.time() - sent["t"] > 10:
+            stage("上传到云端硬盘", min(99.0, (sent["base"] + off) * 100.0 / up_total))
+            sent["t"] = time.time()
+
+    for f in todo:
+        size = os.path.getsize(f["path"])
+        fid = drive_upload(f["path"], f["name"], DRIVE["folder_id"], prog)
+        if not fid:
+            raise RuntimeError("上传失败：" + f["name"])
+        done[f["name"]] = {"id": fid, "size": size}
+        drive_status_write(done)
+        sent["base"] += size
+        os.remove(f["path"])
+        say("INFO", f"已缓存 {f['name']}")
+    say("INFO", f"上传 {up_total / 1e9:.1f} GB 用时 {time.time() - t_up:.0f}s")
+    say("CACHED", str(len(done)))
+
+
+if CFG.get("mode") == "cache":
+    precache()
+elif comfy_alive():
+    if ensure_post() | ensure_nodes():
         stage("重启 ComfyUI")
         subprocess.run(f"pkill -f 'main.py --listen 127.0.0.1 --port {PORT}'", shell=True)
         time.sleep(3)
@@ -148,29 +283,13 @@ else:
             sage = True
         except Exception as e:
             say("WARN", "SageAttention 不可用，改用默认注意力", str(e)[:200])
+    ensure_nodes()
     say("INFO", f"依赖就绪 {time.time()-t0:.0f}s")
 
     # 2. 权重：多线程下载
     stage("下载模型", 0)
-    try:
-        sh("which aria2c || (apt-get -qq update && apt-get -qq install -y aria2)")
-        aria = True
-    except Exception:
-        aria = False
-    files = []
-    for f in CFG["files"]:
-        d = os.path.join(ROOT, "models", f["dir"])
-        os.makedirs(d, exist_ok=True)
-        name = f.get("name") or f["url"].split("?")[0].rsplit("/", 1)[-1]
-        files.append({"url": f["url"], "dir": d, "name": name, "path": os.path.join(d, name), "size": 0})
-
-    def head_size(u):
-        try:
-            req = urllib.request.Request(u, method="HEAD")
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return int(r.headers.get("x-linked-size") or r.headers.get("content-length") or 0)
-        except Exception:
-            return 0
+    aria = have_aria()
+    files = file_list(os.path.join(ROOT, "models"))
     for f in files:
         f["size"] = head_size(f["url"])
     todo = [f for f in files if not (os.path.exists(f["path"]) and not os.path.exists(f["path"] + ".aria2") and (f["size"] == 0 or os.path.getsize(f["path"]) == f["size"]))]

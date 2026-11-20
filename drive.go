@@ -7,12 +7,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -194,10 +196,96 @@ func driveView(ctx context.Context) map[string]any {
 	if getSetting("colab_refresh_token", "") != "" && cfg.DriveCache {
 		scopeOK = hasDriveScope(ctx)
 	}
-	return map[string]any{"enabled": cfg.DriveCache, "scope_ok": scopeOK, "folder": s.FolderID != "", "files": len(s.Files), "bytes": total}
+	need, have := driveCoverage()
+	return map[string]any{"enabled": cfg.DriveCache, "scope_ok": scopeOK, "folder": s.FolderID != "", "files": len(s.Files), "bytes": total, "need": need, "have": have}
 }
 
 func handleDriveReset(w http.ResponseWriter, r *http.Request) {
 	saveDriveState(driveState{Files: map[string]driveFile{}})
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// precache 预缓存：在 CPU 运行时上把云端硬盘里还没有的权重下载并上传，不装 ComfyUI，完成后由调用方关机
+func (r *Runner) precache(ctx context.Context) (int, error) {
+	r.mu.Lock()
+	jup := r.jup
+	r.mu.Unlock()
+	var boot map[string]any
+	_ = json.Unmarshal([]byte(workflowText("boot")), &boot)
+	if boot == nil {
+		boot = map[string]any{}
+	}
+	boot = bootConfig(ctx, jup, boot, VideoPost{})
+	if d, _ := boot["drive"].(map[string]any); d == nil || d["enabled"] != true {
+		return 0, errors.New("云端硬盘缓存不可用")
+	}
+	boot["mode"] = "cache"
+	code := strings.Replace(bootstrapPy, "__CFG__", base64.StdEncoding.EncodeToString([]byte(mustJSON(boot))), 1)
+	bctx, cancel := context.WithTimeout(ctx, 150*time.Minute)
+	defer cancel()
+	// 上传可能超过访问令牌的一小时有效期：期间每 10 分钟把新令牌写进运行时，并记下已传完的文件
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-bctx.Done():
+				return
+			case <-t.C:
+				r.driveSync()
+			}
+		}
+	}()
+	var buf strings.Builder
+	res, err := jup.Exec(bctx, code, func(stream, text string) {
+		r.touch()
+		buf.WriteString(text)
+		for {
+			s := buf.String()
+			i := strings.Index(s, "\n")
+			if i < 0 {
+				break
+			}
+			line := s[:i]
+			buf.Reset()
+			buf.WriteString(s[i+1:])
+			r.handleBootLine(line)
+		}
+	})
+	r.driveSync()
+	if err != nil {
+		return 0, errors.New("预缓存失败：" + err.Error())
+	}
+	if res.Error != "" {
+		return 0, errors.New("预缓存失败：" + res.Error)
+	}
+	i := strings.Index(res.Stdout, "[mj] CACHED ")
+	if i < 0 {
+		return 0, errors.New("预缓存没有完成")
+	}
+	n, _ := strconv.Atoi(strings.Fields(res.Stdout[i+len("[mj] CACHED "):])[0])
+	return n, nil
+}
+
+// driveCoverage 当前模型文件列表里有几个已经在云端硬盘缓存里（按文件名）
+func driveCoverage() (need, have int) {
+	var files []map[string]any
+	_ = json.Unmarshal([]byte(workflowText("files")), &files)
+	s := loadDriveState()
+	for _, f := range files {
+		u, _ := f["url"].(string)
+		name, _ := f["name"].(string)
+		if name == "" {
+			u = strings.SplitN(u, "?", 2)[0]
+			name = u[strings.LastIndex(u, "/")+1:]
+		}
+		if name == "" {
+			continue
+		}
+		need++
+		if s.Files[name].ID != "" {
+			have++
+		}
+	}
+	return
 }

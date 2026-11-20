@@ -283,6 +283,16 @@ func (r *Runner) bringUp(key RuntimeKey) {
 	r.mu.Lock()
 	r.ReadyAt, r.LastActive = now(), now()
 	r.mu.Unlock()
+	if purpose == "cache" {
+		r.setPhase("booting", "预缓存模型")
+		n, err := r.precache(ctx)
+		if err != nil {
+			fail(err.Error())
+			return
+		}
+		r.Stop(fmt.Sprintf("预缓存完成，新增 %d 个文件", n))
+		return
+	}
 	if purpose == "video" {
 		r.setPhase("booting", "准备视频环境")
 		if err := r.bootstrap(ctx); err != nil {
@@ -536,6 +546,8 @@ func (r *Runner) handleBootLine(line string) {
 		if changed {
 			r.logf("%s", st)
 		}
+	case strings.HasPrefix(body, "CACHED"):
+		r.logf("预缓存完成：新传 %s 个文件", strings.TrimSpace(strings.TrimPrefix(body, "CACHED")))
 	case strings.HasPrefix(body, "READY"):
 		r.logf("视频环境就绪 %s", strings.TrimSpace(strings.TrimPrefix(body, "READY")))
 	default:
@@ -654,7 +666,7 @@ func (r *Runner) renderVideo(ctx context.Context, jup *Jupyter, v *Video, cfg Co
 		seed = int64(time.Now().UnixNano() % 1_000_000_000_000)
 	}
 	wf, err := fillWorkflow(workflowText(key), map[string]any{
-		"PROMPT": v.Prompt, "IMAGE": remote, "WIDTH": w, "HEIGHT": h, "LENGTH": framesFor(v.Seconds), "SEED": seed, "PREFIX": fmt.Sprintf("manju/v%d", v.ID),
+		"PROMPT": v.Prompt, "IMAGE": remote, "WIDTH": w, "HEIGHT": h, "LENGTH": framesFor(v.Seconds), "FPS": loadFrameRule().FPS, "SEED": seed, "PREFIX": fmt.Sprintf("manju/v%d", v.ID),
 	})
 	if err != nil {
 		return "", errors.New("工作流格式错误：" + err.Error())
@@ -863,7 +875,15 @@ func startRuntime(acc, shape, purpose string) error {
 	if shape == "" {
 		shape = cfg.Shape
 	}
-	if purpose != "manual" {
+	if purpose == "cache" {
+		if !cfg.DriveCache {
+			return errors.New("先在「调度」里打开云端硬盘缓存并保存")
+		}
+		if !hasDriveScope(context.Background()) {
+			return errors.New("授权里没有云端硬盘权限，先在概览里重新授权")
+		}
+		acc, shape = "NONE", "SHAPE_STANDARD"
+	} else if purpose != "manual" {
 		purpose = "video"
 	}
 	if purpose == "video" && specKey(acc, shape).Variant != "VARIANT_GPU" {

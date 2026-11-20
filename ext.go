@@ -610,10 +610,10 @@ func boolp(desc string) map[string]any { return map[string]any{"type": "boolean"
 var mcpTools = []mcpTool{
 	{"colab_status", "查看 Colab 运行时状态：阶段、加速器、已用 CU 估算、排队视频数、订阅档位。", obj(map[string]any{})},
 	{"colab_specs", "刷新并列出当前账号可用的运行时规格（变体、加速器、形态、是否可用、每小时 CU 估算）。", obj(map[string]any{})},
-	{"colab_start", "申请一台运行时。purpose=video 会安装 ComfyUI 并下载视频模型（需要 GPU）；purpose=manual 只开机用于运行代码。", obj(map[string]any{
+	{"colab_start", "申请一台运行时。purpose=video 会安装 ComfyUI 并下载视频模型（需要 GPU）；purpose=manual 只开机用于运行代码；purpose=cache 用 CPU 运行时把模型文件预缓存到云端硬盘，完成后自动关机（需先开启云端硬盘缓存）。", obj(map[string]any{
 		"accelerator": str("加速器，如 G4、A100、L4、T4、CPU；不填用设置里的默认值"),
 		"shape":       str("SHAPE_STANDARD 或 SHAPE_HIGHMEM"),
-		"purpose":     map[string]any{"type": "string", "enum": []string{"video", "manual"}},
+		"purpose":     map[string]any{"type": "string", "enum": []string{"video", "manual", "cache"}},
 	})},
 	{"colab_stop", "立即关机并释放运行时。", obj(map[string]any{})},
 	{"colab_run_python", "在当前运行时的 Python 内核里执行代码，返回 stdout、stderr、最后一个表达式的值和错误。", obj(map[string]any{

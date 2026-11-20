@@ -22,6 +22,8 @@
 .inline-warn > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inline-warn.is-danger { background: color-mix(in srgb, var(--danger) 9%, transparent); color: var(--danger); margin: 0; }
 .form-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.cache-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 0; padding-top: 14px; border-top: 1px solid var(--line, rgba(0,0,0,.06)); font-size: 13px; }
+.cache-row + .sm-text { margin: 8px 0 0; }
 .form-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 0; }
 .field-label { white-space: nowrap; }
 

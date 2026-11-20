@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ExternalLink, FileJson, KeyRound, Play, Power, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react'
+import { Check, CloudUpload, ExternalLink, FileJson, KeyRound, Play, Power, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react'
 import { api, type ColabCfg, type ColabState, type LedgerRow, type LedgerTotal, type Video, type WorkflowItem } from '../api'
 import { useStore } from '../store'
 import { Empty, Segmented, Select, Spinner, copyText, useInterval, useMedia } from '../components/ui'
@@ -143,7 +143,7 @@ function RuntimeCard({ st, reload }: { st: ColabState; reload: () => void }) {
     <section className="card gcard">
       <div className="gcard-head">
         <h3>运行时</h3>
-        <span className={`phase is-${r.phase}`}><i />{on ? `${accName(r.accelerator)} · ${phaseLabels[r.phase]}` : phaseLabels.off}</span>
+        <span className={`phase is-${r.phase}`}><i />{on ? `${accName(r.accelerator)}${r.purpose === 'cache' ? ' · 预缓存' : ''} · ${phaseLabels[r.phase]}` : phaseLabels.off}</span>
         <span className="grow" />
       </div>
       <div className="rt-stats">
@@ -224,7 +224,7 @@ function Sessions({ st }: { st: ColabState }) {
         {st.sessions.map(s => (
           <div key={s.id} className="tr">
             <span>{fmtTime(s.started_at)}</span>
-            <span>{s.accelerator}{s.purpose === 'manual' ? ' · 代码' : ''}</span>
+            <span>{s.accelerator}{s.purpose === 'manual' ? ' · 代码' : s.purpose === 'cache' ? ' · 预缓存' : ''}</span>
             <span>{s.minutes < 1 ? '<1 分' : `${Math.round(s.minutes)} 分`}</span>
             <span>{s.jobs_done}</span>
             <span>{fmtCU(s.cu)}</span>
@@ -280,6 +280,15 @@ function Schedule({ st, reload }: { st: ColabState; reload: () => void }) {
   const save = async () => {
     try { await api('/api/colab/settings', { method: 'PUT', body: c }); toast('已保存'); reload() } catch (e: any) { toast(e.message, 'err') }
   }
+  const [caching, setCaching] = useState(false)
+  const precache = async () => {
+    if (!confirm('用 CPU 运行时把还没缓存的模型文件下载并传到云端硬盘，完成后自动关机。开始？')) return
+    setCaching(true)
+    try { await api('/api/colab/start', { body: { purpose: 'cache' } }); toast('已开机，进度在概览里看'); reload() } catch (e: any) { toast(e.message, 'err') } finally { setCaching(false) }
+  }
+  const d = st.drive
+  const missing = d ? Math.max(0, (d.need || 0) - (d.have || 0)) : 0
+  const canCache = st.authorized && st.cfg.drive_cache && !!d?.scope_ok && st.runner.phase === 'off'
   const gpuOpts = Array.from(new Set([...(st.info?.specs || []).filter(s => s.eligible && s.key.variant === 'VARIANT_GPU').map(s => s.key.accelerator), c.accelerator])).map(a => ({ value: a, label: a }))
   const num = (k: keyof ColabCfg, label: string, unit: string, step = 1) => (
     <label className="field"><span className="field-label">{label}</span>
@@ -327,7 +336,16 @@ function Schedule({ st, reload }: { st: ColabState; reload: () => void }) {
           </div>
         </div>
         {c.drive_cache && st.drive && !st.drive.scope_ok && st.authorized && <div className="inline-warn"><span>需要在概览里重新授权，添加云端硬盘权限</span></div>}
-        {st.drive?.files > 0 && <div className="row-actions"><span className="grow" /><button className="btn btn-ghost btn-sm" onClick={() => confirm('清空缓存记录？云端硬盘里的文件不会删除。') && api('/api/colab/drive/reset', { method: 'POST' }).then(reload)}>清空缓存记录</button></div>}
+        {st.cfg.drive_cache && d && d.need > 0 && (
+          <div className="cache-row">
+            <span className={missing ? '' : 'muted'}>{missing ? `当前模型文件 ${d.need} 个，还有 ${missing} 个没缓存` : `当前模型文件 ${d.need} 个，已全部缓存`}</span>
+            <span className="grow" />
+            {d.files > 0 && <button className="btn btn-ghost btn-sm" onClick={() => confirm('清空缓存记录？云端硬盘里的文件不会删除。') && api('/api/colab/drive/reset', { method: 'POST' }).then(reload)}>清空缓存记录</button>}
+            {missing > 0 && <button className="btn btn-secondary btn-sm" disabled={!canCache || caching} title={st.runner.phase !== 'off' ? '先关掉当前运行时' : ''} onClick={precache}>{caching ? <Spinner size={13} /> : <CloudUpload size={14} />}预缓存</button>}
+          </div>
+        )}
+        {st.cfg.drive_cache && missing > 0 && <p className="muted sm-text">预缓存用 CPU 运行时（约 {fmtCU(st.cfg.rates['NONE'] ?? 0.07)} CU/时）下载后上传，传完自动关机，之后开 GPU 直接从云端硬盘拉取。</p>}
+        {!st.cfg.drive_cache && d && d.files > 0 && <div className="row-actions"><span className="grow" /><button className="btn btn-ghost btn-sm" onClick={() => confirm('清空缓存记录？云端硬盘里的文件不会删除。') && api('/api/colab/drive/reset', { method: 'POST' }).then(reload)}>清空缓存记录</button></div>}
       </section>
       <div className="row-actions"><span className="grow" /><button className="btn btn-primary" onClick={save}><Check size={16} />保存</button></div>
     </div>
@@ -403,8 +421,8 @@ function Models() {
         {cur.custom && <span className="pill-tag">已修改</span>}
       </div>
       <div className="ph-row">
-        {cur.kind === 'workflow' ? ['{{PROMPT}}', '{{IMAGE}}', '{{WIDTH}}', '{{HEIGHT}}', '{{LENGTH}}', '{{SEED}}', '{{PREFIX}}'].map(p => <code key={p} className="ph">{p}</code>) :
-          cur.kind === 'files' ? <span className="muted sm-text">每项：下载地址 url，放到 ComfyUI/models 下的目录 dir</span> : <span className="muted sm-text">ComfyUI 仓库、是否装 SageAttention、下载线程数、启动参数</span>}
+        {cur.kind === 'workflow' ? ['{{PROMPT}}', '{{IMAGE}}', '{{WIDTH}}', '{{HEIGHT}}', '{{LENGTH}}', '{{FPS}}', '{{SEED}}', '{{PREFIX}}'].map(p => <code key={p} className="ph">{p}</code>) :
+          cur.kind === 'files' ? <span className="muted sm-text">每项：下载地址 url，放到 ComfyUI/models 下的目录 dir</span> : <span className="muted sm-text">{key === 'boot' ? 'ComfyUI 仓库；插件 custom_nodes（仓库地址列表）；帧率 fps；帧数取「除以 frame_step 余 frame_rem」，如 4k+1 填 4 和 1；SageAttention、下载线程数、启动参数' : '放大与补帧所用的模型和插件'}</span>}
       </div>
       <textarea className="input code-area" rows={22} value={text} onChange={e => setText(e.target.value)} spellCheck={false} />
       <div className="row-actions">
