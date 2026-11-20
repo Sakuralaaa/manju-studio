@@ -146,3 +146,30 @@ func bootConfig(ctx context.Context, jup *Jupyter, boot map[string]any, post Vid
 }
 
 var _ = fmt.Sprint
+
+// bypassNode 把某类「model 进、model 出」的节点从工作流里拿掉，下游改接它的 model 输入。
+// 用于运行时上没装成功的加速插件（如 TE-Speed），避免整条任务失败。返回拿掉了几个。
+func bypassNode(wf map[string]any, class string) int {
+	n := 0
+	for {
+		id, node := findNode(wf, class)
+		if node == nil {
+			return n
+		}
+		src := nodeInputs(node)["model"]
+		delete(wf, id)
+		for _, v := range wf {
+			m, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			in := nodeInputs(m)
+			for k, x := range in {
+				if ref, ok := x.([]any); ok && len(ref) == 2 && fmt.Sprint(ref[0]) == id {
+					in[k] = src
+				}
+			}
+		}
+		n++
+	}
+}

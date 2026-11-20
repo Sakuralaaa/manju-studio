@@ -422,7 +422,7 @@ function Models() {
       </div>
       <div className="ph-row">
         {cur.kind === 'workflow' ? ['{{PROMPT}}', '{{IMAGE}}', '{{WIDTH}}', '{{HEIGHT}}', '{{LENGTH}}', '{{FPS}}', '{{SEED}}', '{{PREFIX}}'].map(p => <code key={p} className="ph">{p}</code>) :
-          cur.kind === 'files' ? <span className="muted sm-text">每项：下载地址 url，放到 ComfyUI/models 下的目录 dir</span> : <span className="muted sm-text">{key === 'boot' ? 'ComfyUI 仓库；插件 custom_nodes（仓库地址列表）；帧率 fps；帧数取「除以 frame_step 余 frame_rem」，如 4k+1 填 4 和 1；SageAttention、下载线程数、启动参数' : '放大与补帧所用的模型和插件'}</span>}
+          cur.kind === 'files' ? <span className="muted sm-text">每项：下载地址 url，放到 ComfyUI/models 下的目录 dir</span> : <span className="muted sm-text">{key === 'boot' ? 'ComfyUI 仓库；插件 custom_nodes（仓库地址列表）；帧率 fps；帧数取「除以 frame_step 余 frame_rem」，如 4k+1 填 4 和 1；SageAttention（G4 优先用预编译轮子 sage_wheel）、TE-Speed 加速 te_speed（只作用于标准工作流，删掉这项就不装）、下载线程数、启动参数' : '放大与补帧所用的模型和插件'}</span>}
       </div>
       <textarea className="input code-area" rows={22} value={text} onChange={e => setText(e.target.value)} spellCheck={false} />
       <div className="row-actions">

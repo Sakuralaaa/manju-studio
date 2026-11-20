@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,13 @@ import (
 )
 
 //go:embed colab/bootstrap.py
-var bootstrapPy string
+var bootstrapPyRaw string
+
+//go:embed colab/te_patch.py
+var tePatchPy string
+
+// bootstrapPy 开机脚本，里面带上 TE-Speed 补丁脚本
+var bootstrapPy = strings.Replace(bootstrapPyRaw, "__TEPATCH__", base64.StdEncoding.EncodeToString([]byte(tePatchPy)), 1)
 
 //go:embed colab/job.py
 var jobPy string
@@ -19,18 +26,23 @@ var jobPy string
 //   {{PROMPT}} 提示词  {{IMAGE}} 首帧文件名（ComfyUI/input 下）  {{WIDTH}} {{HEIGHT}} 宽高
 //   {{LENGTH}} 帧数（17k+5）  {{SEED}} 随机种子  {{PREFIX}} 输出文件名前缀
 // 节点与参数取自 Comfy-Org/workflow_templates 的 video_minimax_h3_i2v（子图展开）。
+// 标准工作流加了 TE-Speed（HELPMEEADICE/TE-Speed-MiniMaxH3-OSS，块缓存，参数用它的默认值）：
+// soren-labs/minimax-h3-colab 在 G4 上实测 20 步 8 秒 768p 从 514s 降到 288s。
+// 运行时没装上 TE-Speed 时，渲染前会自动把这个节点跳过（见 bypassNode）。
+// Turbo 只有 8 步、本身是蒸馏模型，缓存窗口里几乎没有可省的步数，所以不加。
 
 const wfStandard = `{
   "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
+  "17": {"class_type": "TESpeedMiniMaxH3", "inputs": {"model": ["1", 0], "processing_control_value": 0.12, "processing_percent_1": 0.1, "processing_percent_2": 0.9, "mcs": 2, "device": "auto", "cache_depth": 0.75}},
   "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
   "3": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"}},
   "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
   "5": {"class_type": "LoadImage", "inputs": {"image": "{{IMAGE}}"}},
   "6": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "first_frame": ["5", 0], "prompt": "{{PROMPT}}", "width": "{{WIDTH}}", "height": "{{HEIGHT}}", "length": "{{LENGTH}}"}},
   "7": {"class_type": "RandomNoise", "inputs": {"noise_seed": "{{SEED}}"}},
-  "8": {"class_type": "BasicGuider", "inputs": {"model": ["1", 0], "conditioning": ["6", 0]}},
+  "8": {"class_type": "BasicGuider", "inputs": {"model": ["17", 0], "conditioning": ["6", 0]}},
   "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
-  "10": {"class_type": "BasicScheduler", "inputs": {"model": ["1", 0], "scheduler": "simple", "steps": 20, "denoise": 1}},
+  "10": {"class_type": "BasicScheduler", "inputs": {"model": ["17", 0], "scheduler": "simple", "steps": 20, "denoise": 1}},
   "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["7", 0], "guider": ["8", 0], "sampler": ["9", 0], "sigmas": ["10", 0], "latent_image": ["6", 1]}},
   "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
   "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
@@ -79,7 +91,7 @@ var workflowDefs = []wfDef{
 	{Key: "standard", Name: "标准工作流", Default: wfStandard, Kind: "workflow"},
 	{Key: "turbo", Name: "Turbo 工作流", Default: wfTurbo, Kind: "workflow"},
 	{Key: "files", Name: "模型文件", Default: defaultFiles, Kind: "files"},
-	{Key: "boot", Name: "运行环境", Default: `{"comfy_repo": "https://github.com/Comfy-Org/ComfyUI", "custom_nodes": [], "fps": 24, "frame_step": 17, "frame_rem": 5, "sage": true, "sage_pkg": "sageattention", "threads": 16, "extra_args": []}`, Kind: "boot"},
+	{Key: "boot", Name: "运行环境", Default: `{"comfy_repo": "https://github.com/Comfy-Org/ComfyUI", "custom_nodes": [], "fps": 24, "frame_step": 17, "frame_rem": 5, "sage": true, "sage_pkg": "sageattention", "sage_wheel": {"url": "https://raw.githubusercontent.com/soren-labs/minimax-h3-colab/main/artifacts/sageattention/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl", "sha256": "e95daf3bce7d3fcb8e8ee3b22cd483f917a544442cbf83d570b0136f148732d4", "torch": "2.11.0+cu128", "python": "3.12", "cc": "12.0"}, "te_speed": {"repo": "https://github.com/HELPMEEADICE/TE-Speed-MiniMaxH3-OSS", "rev": "c1dacf47bc02cb9326f7b93c69280529b93d391b"}, "threads": 16, "extra_args": []}`, Kind: "boot"},
 	{Key: "post", Name: "画质后期", Default: defaultPost, Kind: "boot"},
 }
 

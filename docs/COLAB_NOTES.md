@@ -97,3 +97,12 @@
 - `RealESRGAN_x2plus` 放大、`RIFE VFI` 补帧在 G4 上的耗时与显存（估算默认每段 1.5 / 1 分钟，可改）；ComfyUI-Frame-Interpolation 的安装（`install.py`，cupy 后端）；
 - 云端硬盘的真实上传 / 下载（现有授权只有 Colab 权限，没有替用户重新授权）。方法：drive.file 范围；`POST drive/v3/files` 建文件夹；
   `POST upload/drive/v3/files?uploadType=resumable` 拿到会话地址后按 64 MB 分块 `PUT`（`Content-Range`，308 继续）；下载 `GET drive/v3/files/{id}?alt=media` 带 Bearer 令牌，aria2 支持分段。
+
+## 加速（v0.2.3）
+
+- **TE-Speed**（HELPMEEADICE/TE-Speed-MiniMaxH3-OSS，GPLv3，开机时从 GitHub 拉取，不随本项目分发）：块缓存，只加在标准（20 步）工作流上。soren-labs/minimax-h3-colab 在 G4 实测 20 步 8 秒：480p 182s→104s，768p 514s→288s（full=8 cache=12）。
+- 插件自带的 patch_model.py 只认 2026 年 8 月初的 ComfyUI；新版 ComfyUI 把块循环搬进了 `_run_blocks`，所以用自带的 `colab/te_patch.py` 加同样的钩子（区间执行 + `("block_loop", 0)`）。已在 ComfyUI 主线（2026-11-20）上打补丁并用模拟块验证：20 步走 8 完整 + 12 缓存，输出与不加速一致。没装上时自动跳过该节点，按原速出片。
+- Turbo（8 步蒸馏）不加 TE-Speed：步数太少，缓存窗口里几乎没有可省的步。
+- **SageAttention**：G4（Python 3.12、torch 2.11.0+cu128、sm_120）优先装 soren-labs 预编译的 2.2.0 轮子并校验 sha256，其他情况装 PyPI 版本。
+- **为什么不换 BF16**：soren-labs 方案本身用的也是 int8 主模型；BF16 精简版 40.2 GB，是 int8 的两倍，下载和云端缓存都翻倍，画质差异很小（int8 量化误差约 0.9%，第三方实测）。按成本优先，保持 int8。
+- 未在 GPU 上实测：TE-Speed 与新版 ComfyUI 的实际提速、预编译 Sage 轮子与当前 Colab torch 版本是否匹配。

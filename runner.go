@@ -100,6 +100,7 @@ type Runner struct {
 	cancelJob   context.CancelFunc
 	bootCancel  context.CancelFunc
 	postReady   VideoPost
+	teSpeed     bool // 运行时上 TE-Speed 加速节点可用
 	driveAt     time.Time
 }
 
@@ -377,6 +378,7 @@ func (r *Runner) Stop(reason string) {
 		r.mu.Lock()
 		r.Phase, r.Runtime, r.jup, r.conn, r.Booted, r.CurrentJob, r.Stage, r.StagePct = "off", "", nil, nil, false, 0, "", 0
 		r.postReady = VideoPost{}
+		r.teSpeed = false
 		r.StartedAt, r.ReadyAt = 0, 0
 		if strings.HasPrefix(reason, "开机失败") {
 			_ = setSetting("colab_autostart_block", "1") // 开机失败后不再自动重试，等手动开机
@@ -548,6 +550,16 @@ func (r *Runner) handleBootLine(line string) {
 		}
 	case strings.HasPrefix(body, "CACHED"):
 		r.logf("预缓存完成：新传 %s 个文件", strings.TrimSpace(strings.TrimPrefix(body, "CACHED")))
+	case strings.HasPrefix(body, "FEAT "):
+		on := strings.Contains(body, "te_speed=1")
+		r.mu.Lock()
+		r.teSpeed = on
+		r.mu.Unlock()
+		if on {
+			r.logf("TE-Speed 加速已启用")
+		} else {
+			r.logf("TE-Speed 没装上，标准工作流按原速跑")
+		}
 	case strings.HasPrefix(body, "READY"):
 		r.logf("视频环境就绪 %s", strings.TrimSpace(strings.TrimPrefix(body, "READY")))
 	default:
@@ -670,6 +682,12 @@ func (r *Runner) renderVideo(ctx context.Context, jup *Jupyter, v *Video, cfg Co
 	})
 	if err != nil {
 		return "", errors.New("工作流格式错误：" + err.Error())
+	}
+	r.mu.Lock()
+	te := r.teSpeed
+	r.mu.Unlock()
+	if !te {
+		bypassNode(wf, "TESpeedMiniMaxH3")
 	}
 	if lastRemote != "" {
 		if err := injectLastFrame(wf, lastRemote); err != nil {

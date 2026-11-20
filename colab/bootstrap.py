@@ -52,6 +52,76 @@ def wait_comfy(proc, sage):
     say("ERR", open("/content/comfy.log").read()[-3000:])
     raise RuntimeError("ComfyUI 启动超时")
 
+def install_sage():
+    """SageAttention：G4（Blackwell、Python 3.12、torch 2.11+cu128）优先装 soren-labs 预编译的 2.2.0 轮子（校验 sha256），
+    其他情况装 PyPI 版本。都不行就用默认注意力。返回是否可用。"""
+    w = CFG.get("sage_wheel") or {}
+    if w.get("url"):
+        try:
+            info = subprocess.run([sys.executable, "-c", "import sys,torch;c=torch.cuda.get_device_capability();print(f'{sys.version_info[0]}.{sys.version_info[1]}',torch.__version__,f'{c[0]}.{c[1]}')"],
+                                  capture_output=True, text=True).stdout.split()
+            if info == [w.get("python"), w.get("torch"), w.get("cc")]:
+                import hashlib
+                dst = "/content/" + w["url"].rsplit("/", 1)[-1]
+                sh(f"curl -sSL -o '{dst}' '{w['url']}'")
+                if hashlib.sha256(open(dst, "rb").read()).hexdigest() != w.get("sha256"):
+                    raise RuntimeError("轮子校验不通过")
+                sh(f"{sys.executable} -m pip install -q --no-deps '{dst}'")
+                sh(f"{sys.executable} -c 'import sageattention'")
+                say("INFO", "SageAttention 2.2.0（预编译）")
+                return True
+        except Exception as e:
+            say("WARN", "预编译 SageAttention 不可用，改装通用版", str(e)[:200])
+    try:
+        sh(f"{sys.executable} -m pip install -q {CFG.get('sage_pkg') or 'sageattention'}")
+        sh(f"{sys.executable} -c 'import sageattention'")
+        return True
+    except Exception as e:
+        say("WARN", "SageAttention 不可用，改用默认注意力", str(e)[:200])
+        return False
+
+def ensure_te():
+    """TE-Speed 加速：装插件，再用自带的 te_patch.py 给新版 ComfyUI 的 MiniMax H3 模型加钩子
+    （插件自带的 patch_model.py 只认 8 月初的 ComfyUI）。失败就还原，不影响出片。返回是否新装。"""
+    te = CFG.get("te_speed") or {}
+    if not te.get("repo"):
+        return False
+    d = os.path.join(ROOT, "custom_nodes", "TE-Speed-MiniMaxH3-OSS")
+    if os.path.exists(os.path.join(d, ".mj_ok")):
+        return False
+    stage("安装 TE-Speed 加速")
+    patcher = "/content/mj_te_patch.py"
+    try:
+        open(patcher, "wb").write(base64.b64decode("__TEPATCH__"))
+        if not os.path.exists(d):
+            sh(f"git clone -q '{te['repo']}' '{d}'")
+            if te.get("rev"):
+                sh(f"git -C '{d}' checkout -q {te['rev']}")
+        out = sh(f"{sys.executable} {patcher} {ROOT}")
+        if "OK" not in out and "ALREADY" not in out:
+            raise RuntimeError(out[-200:])
+        open(os.path.join(d, ".mj_ok"), "w").write("1")
+        return True
+    except Exception as e:
+        say("WARN", "TE-Speed 装不上，按原速运行", str(e)[:200])
+        subprocess.run(f"{sys.executable} {patcher} {ROOT} --revert", shell=True, capture_output=True)
+        subprocess.run(f"rm -rf '{d}'", shell=True)
+        return False
+
+def report_feats():
+    """TE-Speed 节点注册了、模型文件也打上了钩子，才算可用。"""
+    ok = False
+    try:
+        hooked = "# mj-te-speed hook" in open(f"{ROOT}/comfy/ldm/minimax/model.py").read()
+        info = json.load(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/object_info/TESpeedMiniMaxH3", timeout=30))
+        ok = hooked and "TESpeedMiniMaxH3" in info
+    except Exception:
+        pass
+    say("FEAT", "te_speed=" + ("1" if ok else "0"))
+
+def sage_flag():
+    return os.path.exists("/content/.mj_sage")
+
 def ensure_post():
     """画质后期组件：放大模型（只是文件）、补帧自定义节点（新装需要重启 ComfyUI）。返回是否新装了节点。"""
     new_node = False
@@ -260,11 +330,12 @@ def precache():
 if CFG.get("mode") == "cache":
     precache()
 elif comfy_alive():
-    if ensure_post() | ensure_nodes():
+    if ensure_post() | ensure_nodes() | ensure_te():
         stage("重启 ComfyUI")
         subprocess.run(f"pkill -f 'main.py --listen 127.0.0.1 --port {PORT}'", shell=True)
         time.sleep(3)
-        wait_comfy(launch(False), False)
+        wait_comfy(launch(sage_flag()), sage_flag())
+    report_feats()
     say("READY", "已在运行")
 else:
     t0 = time.time()
@@ -277,13 +348,9 @@ else:
     sage = False
     if CFG.get("sage"):
         stage("安装 SageAttention")
-        try:
-            sh(f"{sys.executable} -m pip install -q {CFG.get('sage_pkg') or 'sageattention'}")
-            sh(f"{sys.executable} -c 'import sageattention'")
-            sage = True
-        except Exception as e:
-            say("WARN", "SageAttention 不可用，改用默认注意力", str(e)[:200])
+        sage = install_sage()
     ensure_nodes()
+    ensure_te()
     say("INFO", f"依赖就绪 {time.time()-t0:.0f}s")
 
     # 2. 权重：多线程下载
@@ -356,4 +423,7 @@ else:
     # 3. 启动 ComfyUI
     stage("启动 ComfyUI")
     proc, sage = wait_comfy(launch(sage), sage)
+    if sage:
+        open("/content/.mj_sage", "w").write("1")
+    report_feats()
     say("READY", f"用时 {time.time()-t0:.0f}s", "sage" if sage else "")
