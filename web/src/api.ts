@@ -40,7 +40,7 @@ export interface Episode {
   created_at: number; updated_at: number
 }
 export interface PipeLog { t: number; text: string }
-export interface Pipe { id: number; episode_id: number; mode: 'auto' | 'ask'; status: 'running' | 'confirm' | 'waiting' | 'done' | 'failed' | 'canceled'; stage: string; message: string; confirmed: string[]; log: PipeLog[]; started_at: number; updated_at: number }
+export interface Pipe { id: number; episode_id: number; mode: 'auto' | 'ask' | 'writer'; status: 'running' | 'confirm' | 'waiting' | 'waiting_writer' | 'done' | 'failed' | 'canceled'; stage: string; message: string; confirmed: string[]; log: PipeLog[]; started_at: number; updated_at: number }
 export interface ProjectCard extends Project { cover: string; episodes: number; finished: number; assets: number; steps: boolean[]; next_episode: number; next_no: number }
 export interface Asset {
   id: number; project_id: number; kind: 'character' | 'scene' | 'prop'; code: string; name: string; description: string; prompt: string

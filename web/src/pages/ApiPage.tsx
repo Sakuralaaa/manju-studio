@@ -1,12 +1,30 @@
 import { useEffect, useState } from 'react'
-import { Copy, KeyRound, Plus, Trash2 } from 'lucide-react'
+import { Copy, FileText, KeyRound, Plus, Trash2 } from 'lucide-react'
 import { api, type ApiKey } from '../api'
 import { useStore } from '../store'
-import { Empty, Modal, Spinner, copyText } from '../components/ui'
+import { Empty, Modal, Segmented, Spinner, copyText } from '../components/ui'
 import { PageHead } from './Projects'
 import { fmtTime } from '../labels'
 
 const tools: [string, string][] = [
+  ['get_writing_context', '写作上下文：设定集、前情、角色造型、本集状态'],
+  ['save_bible', '写设定集：世界观、人物小传、总纲'],
+  ['save_synopsis', '写本集梗概'],
+  ['save_script', '写剧本（含台词角色与语气）'],
+  ['save_shots', '写分镜：镜头、画面、台词、资产、衔接'],
+  ['save_episode_summary', '写本集摘要与卡点'],
+  ['upsert_asset', '新建或更新角色、场景、道具外观'],
+  ['view_asset_images', '看资产设定图、三视图、表情表'],
+  ['view_shot', '看关键帧与视频首尾帧'],
+  ['listen_dub', '听台词配音'],
+  ['get_video_link', '视频限时下载地址'],
+  ['list_projects', '作品列表与缺失步骤'],
+  ['list_episodes', '设定集与各集进度'],
+  ['create_episode', '新建下一集'],
+  ['get_episode', '一集的剧本、分镜与状态'],
+  ['autopilot_start', '一键成集（含外部编剧模式）'],
+  ['autopilot_status', '一键成集进度'],
+  ['generate_dub', '生成整集配音'],
   ['colab_status', '运行时状态、排队数、已用 CU'],
   ['colab_specs', '可用运行时规格'],
   ['colab_start', '开机（视频 / 仅运行代码）'],
@@ -14,7 +32,6 @@ const tools: [string, string][] = [
   ['colab_run_python', '在运行时上执行 Python'],
   ['video_submit', '提交图生视频任务'],
   ['video_status', '查询视频任务'],
-  ['list_projects', '作品列表与缺失步骤'],
   ['list_shots', '作品分镜'],
   ['image_generate', '调用生图渠道'],
 ]
@@ -40,6 +57,7 @@ export default function ApiPage() {
   const [name, setName] = useState('')
   const [created, setCreated] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const [agWay, setAgWay] = useState<'remote' | 'bridge'>('remote')
   const load = () => api<ApiKey[]>('/api/keys').then(setKeys).catch(() => setKeys([]))
   useEffect(() => { load() }, [])
   const origin = location.origin
@@ -47,6 +65,12 @@ export default function ApiPage() {
     try { const r = await api<{ key: string }>('/api/keys', { body: { name } }); setCreated(r.key); setName(''); setAdding(false); load() } catch (e: any) { toast(e.message, 'err') }
   }
   const copy = async (t: string) => { await copyText(t); toast('已复制') }
+  const agConf = JSON.stringify(agWay === 'remote'
+    ? { mcpServers: { manju: { serverUrl: `${origin}/mcp`, headers: { Authorization: 'Bearer <密钥>' }, timeoutSeconds: 600 } } }
+    : { mcpServers: { manju: { command: '/path/to/manju-mcp-bridge', env: { MANJU_MCP_URL: `${origin}/mcp`, MANJU_API_KEY: '<密钥>' }, timeoutSeconds: 600 } } }, null, 2)
+  const copyRules = async () => {
+    try { const r = await fetch('/api/antigravity/rules'); if (!r.ok) throw new Error('读取规则文件失败'); await copy(await r.text()) } catch (e: any) { toast(e.message, 'err') }
+  }
   const mcpConf = JSON.stringify({ mcpServers: { manju: { type: 'http', url: `${origin}/mcp`, headers: { Authorization: 'Bearer <密钥>' } } } }, null, 2)
   return (
     <div className="page page-narrow">
@@ -65,6 +89,21 @@ export default function ApiPage() {
               ))}
             </div>
           )}
+        </section>
+        <section className="card gcard" id="antigravity">
+          <div className="gcard-head"><h3>Antigravity</h3><span className="mini-tag">外部编剧</span></div>
+          <ol className="ag-steps">
+            <li>在上面新建一个密钥。</li>
+            <li>在 Antigravity 的智能体面板点「…」→ MCP 服务器 → 管理 → 查看原始配置，把下面这段加进 <code>mcp_config.json</code>，<code>&lt;密钥&gt;</code> 换成你的密钥。</li>
+            <li>把规则文件存为 Antigravity 工作区根目录下的 <code>AGENTS.md</code>，Gemini 会按漫剧的写法工作。</li>
+            <li>在这里的「一键成集」选「外部编剧」，然后在 Antigravity 里说「接着写第 N 集」。</li>
+          </ol>
+          <Segmented value={agWay} onChange={v => setAgWay(v as any)} options={[{ value: 'remote', label: '远程连接（推荐）' }, { value: 'bridge', label: '本地桥接' }]} />
+          <pre className="codeblock">{agConf}</pre>
+          <div className="ag-row">
+            <button className="btn btn-primary btn-sm" onClick={() => copy(agConf)}><Copy size={14} />复制配置</button>
+            <button className="btn btn-secondary btn-sm" onClick={copyRules}><FileText size={14} />复制规则文件</button>
+          </div>
         </section>
         <section className="card gcard">
           <div className="gcard-head"><h3>MCP</h3><span className="mini-tag">可流式 HTTP</span></div>

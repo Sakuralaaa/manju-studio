@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -322,7 +323,7 @@ func toolAutopilot(ctx context.Context, action string, a pipeArgs) (any, error) 
 		return startPipe(a.EpisodeID, a.Mode)
 	case "continue":
 		lp := latestPipe(a.EpisodeID)
-		if lp == nil || (lp.Status != "confirm" && lp.Status != "failed" && lp.Status != "canceled") {
+		if lp == nil || (lp.Status != "confirm" && lp.Status != "failed" && lp.Status != "canceled" && lp.Status != "waiting_writer") {
 			return nil, errors.New("没有需要继续的一键成集")
 		}
 		if lp.Status == "confirm" {
@@ -631,10 +632,10 @@ var mcpTools = []mcpTool{
 		"project_id": num("作品编号"), "idea": str("本集梗概，可留空"), "ai_idea": boolp("自动拟定梗概"),
 	}, "project_id")},
 	{"get_episode", "查看一集的剧本、摘要、各步骤状态和分镜。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
-	{"autopilot_start", "一键成集：梗概→剧本→资产→分镜→关键帧→配音→视频（只排队，按算力设置决定是否开机）→成片→摘要与封面。mode=auto 全自动；mode=ask 在剧本、资产、分镜之后暂停等确认。", obj(map[string]any{
-		"episode_id": num("集编号"), "mode": map[string]any{"type": "string", "enum": []string{"auto", "ask"}},
+	{"autopilot_start", "一键成集：梗概→剧本→资产→分镜→关键帧→配音→视频（只排队，按算力设置决定是否开机）→成片→摘要与封面。mode=auto 全自动；mode=ask 在剧本、资产、分镜之后暂停等确认；mode=writer（外部编剧）在梗概、剧本、分镜处暂停（状态 waiting_writer），由你调用 save_synopsis / save_script / upsert_asset / save_shots 写入后自动继续，应用不调用文本模型。", obj(map[string]any{
+		"episode_id": num("集编号"), "mode": map[string]any{"type": "string", "enum": []string{"auto", "ask", "writer"}},
 	}, "episode_id")},
-	{"autopilot_status", "查询一键成集进度：状态（running / confirm / waiting / done / failed / canceled）、当前阶段、日志。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
+	{"autopilot_status", "查询一键成集进度：状态（running / confirm / waiting / waiting_writer / done / failed / canceled）、当前阶段、日志。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
 	{"autopilot_continue", "确认当前暂停点（或从失败处重试），继续一键成集。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
 	{"autopilot_cancel", "停止一键成集。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
 	{"generate_dub", "为一集的全部台词生成配音（按各角色音色与旁白音色）；force=true 时全部重做。", obj(map[string]any{"episode_id": num("集编号"), "force": boolp("全部重做")}, "episode_id")},
@@ -653,7 +654,22 @@ type rpcReq struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+// 支持的协议版本（新的在前）
+var mcpVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+
 func handleMCP(w http.ResponseWriter, r *http.Request) {
+	// Streamable HTTP：校验 Origin，防 DNS 重绑定（非浏览器客户端不带 Origin）
+	if o := r.Header.Get("Origin"); o != "" && o != "null" {
+		if u, err := url.Parse(o); err != nil || u.Host != r.Host {
+			httpErr(w, 403, "不允许的来源")
+			return
+		}
+	}
+	pv := r.Header.Get("Mcp-Protocol-Version")
+	if pv != "" && !contains(mcpVersions, pv) {
+		httpErr(w, 400, "不支持的 MCP 协议版本："+pv)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
 		httpErr(w, 400, "读取请求失败")
@@ -669,7 +685,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		var outs []any
 		for _, q := range reqs {
-			if res := mcpHandle(r.Context(), q, base); res != nil {
+			if res := mcpHandle(r.Context(), q, base, pv); res != nil {
 				outs = append(outs, res)
 			}
 		}
@@ -685,7 +701,16 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 		writeRPC(w, rpcError(nil, -32700, "解析失败"))
 		return
 	}
-	res := mcpHandle(r.Context(), q, base)
+	if q.JSONRPC != "2.0" || q.Method == "" {
+		if q.Method == "" && (len(q.ID) > 0) {
+			// 客户端发来的响应（我们不发请求），按规范接受即可
+			w.WriteHeader(202)
+			return
+		}
+		writeRPC(w, rpcError(q.ID, -32600, "无效请求"))
+		return
+	}
+	res := mcpHandle(r.Context(), q, base, pv)
 	if res == nil {
 		w.WriteHeader(202)
 		return
@@ -702,7 +727,7 @@ func rpcError(id json.RawMessage, code int, msg string) map[string]any {
 	return map[string]any{"jsonrpc": "2.0", "id": id, "error": map[string]any{"code": code, "message": msg}}
 }
 
-func mcpHandle(ctx context.Context, q rpcReq, base string) any {
+func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 	if len(q.ID) == 0 || string(q.ID) == "null" {
 		return nil // 通知
 	}
@@ -714,19 +739,19 @@ func mcpHandle(ctx context.Context, q rpcReq, base string) any {
 		}
 		_ = json.Unmarshal(q.Params, &p)
 		pv := p.ProtocolVersion
-		if pv == "" {
+		if !contains(mcpVersions, pv) {
 			pv = "2025-06-18"
 		}
 		return ok(map[string]any{
 			"protocolVersion": pv,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "manju-studio", "title": "漫剧工坊", "version": version},
-			"instructions":    "漫剧工坊：作品是连载剧集（设定集 + 多集，资产库跨集共享）。可以新建一集并一键成集（autopilot_start，异步，用 autopilot_status 轮询，mode=ask 时用 autopilot_continue 确认）、生成配音、合成语音；也能直接管理 Colab 运行时、执行 Python、提交 MiniMax H3 图生视频（video_submit 后用 video_status 轮询）、调用生图渠道。",
+			"instructions":    "漫剧工坊。外部编剧（如 Antigravity 里的 Gemini）：先调用 get_writing_context，用 view_asset_images 看角色定妆，再用 save_bible / save_synopsis / save_script / upsert_asset / save_shots / save_episode_summary 交回文字，全部用简体中文；一键成集 mode=writer 时写入后自动继续。不要在用户没同意时调用 colab_start（会消耗 Colab 算力单元）。作品是连载剧集（设定集 + 多集，资产库跨集共享）。可以新建一集并一键成集（autopilot_start，异步，用 autopilot_status 轮询，mode=ask 时用 autopilot_continue 确认）、生成配音、合成语音；也能直接管理 Colab 运行时、执行 Python、提交 MiniMax H3 图生视频（video_submit 后用 video_status 轮询）、调用生图渠道。",
 		})
 	case "ping":
 		return ok(map[string]any{})
 	case "tools/list":
-		return ok(map[string]any{"tools": mcpTools})
+		return ok(map[string]any{"tools": append(append([]mcpTool{}, writerTools...), mcpTools...)})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -738,12 +763,22 @@ func mcpHandle(ctx context.Context, q rpcReq, base string) any {
 		if len(p.Arguments) == 0 || string(p.Arguments) == "null" {
 			p.Arguments = []byte("{}")
 		}
-		v, err := callTool(ctx, p.Name, p.Arguments, base)
+		v, err := callWriterTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
+		if errors.Is(err, errUnknownTool) {
+			v, err = callTool(ctx, p.Name, p.Arguments, base)
+		}
 		if errors.Is(err, errUnknownTool) {
 			return rpcError(q.ID, -32602, "没有这个工具："+p.Name)
 		}
 		if err != nil {
 			return ok(map[string]any{"content": []any{map[string]any{"type": "text", "text": err.Error()}}, "isError": true})
+		}
+		if rich, isRich := v.(*mcpRich); isRich {
+			res := map[string]any{"content": rich.Blocks}
+			if rich.Structured != nil {
+				res["structuredContent"] = wrapStructured(rich.Structured)
+			}
+			return ok(res)
 		}
 		b, _ := json.MarshalIndent(v, "", "  ")
 		return ok(map[string]any{"content": []any{map[string]any{"type": "text", "text": string(b)}}, "structuredContent": wrapStructured(v)})

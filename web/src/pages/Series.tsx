@@ -18,7 +18,7 @@ export default function Series({ id }: { id: number }) {
     try { const d = await api<SeriesFull>(`/api/projects/${id}`); toasts(d.tasks); setData(d) } catch (e: any) { setErr(e.message) }
   }, [id])
   useEffect(() => { reload() }, [reload])
-  const busy = !!data && (data.tasks.some(t => t.status === 'running') || data.episodes.some(e => e.pipeline && ['running', 'waiting'].includes(e.pipeline.status)))
+  const busy = !!data && (data.tasks.some(t => t.status === 'running') || data.episodes.some(e => e.pipeline && ['running', 'waiting', 'waiting_writer'].includes(e.pipeline.status)))
   useInterval(reload, busy ? 2500 : 15000)
   const run = useRunner(reload)
   if (err) return <div className="page"><div className="card card-empty">{err}</div></div>
@@ -74,7 +74,7 @@ function Episodes({ data, run }: { data: SeriesFull; run: (fn: () => Promise<any
           const steps = e.steps.done
           const next = steps.findIndex(x => !x)
           const pl = e.pipeline
-          const plOn = pl && ['running', 'waiting', 'confirm', 'failed'].includes(pl.status)
+          const plOn = pl && ['running', 'waiting', 'waiting_writer', 'confirm', 'failed'].includes(pl.status)
           return (
             <article key={e.id} className="card ecard" onClick={() => go({ page: 'project', id: p.id, ep: e.id })}>
               <div className={`ecover ar-${p.aspect.replace(':', '-')}`}>

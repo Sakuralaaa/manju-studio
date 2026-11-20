@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // charRefImage 角色参考图：定妆三视图（正侧背全身，发型服装最完整）> 设定图 > 表情表
@@ -105,6 +106,23 @@ func charLook(p *Project, a *Asset) string {
 			dup := seen[k]
 			for _, have := range parts {
 				if strings.Contains(have, k) {
+					dup = true
+				}
+			}
+			// 「外貌：A，B」这类带标签的句子：每个小句都已写过就不再重复
+			if !dup {
+				body := k
+				if i := strings.Index(body, "："); i > 0 && utf8.RuneCountInString(body[:i]) <= 6 {
+					body = body[i+len("："):]
+				}
+				all := strings.Join(parts, "，")
+				var rest []string
+				for _, c := range strings.Split(body, "，") {
+					if c != "" && !strings.Contains(all, c) {
+						rest = append(rest, c)
+					}
+				}
+				if len(rest) == 0 && len(parts) > 0 {
 					dup = true
 				}
 			}

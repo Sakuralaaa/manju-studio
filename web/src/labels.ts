@@ -122,7 +122,7 @@ export const pipeStageNames: Record<string, string> = {
 }
 export const pipeStageOrder = ['idea', 'script', 'assets', 'storyboard', 'keyframes', 'voice', 'videos', 'final', 'wrap']
 export const pipeStatusNames: Record<string, string> = {
-  running: '进行中', confirm: '等你确认', waiting: '等待渲染', done: '已完成', failed: '已中断', canceled: '已停止',
+  running: '进行中', confirm: '等你确认', waiting: '等待渲染', waiting_writer: '等外部编剧', done: '已完成', failed: '已中断', canceled: '已停止',
 }
 export const chainNames: Record<string, string> = { off: '不衔接', ref: '参考上一镜', first: '首尾帧' }
 export const voiceTypeNames: Record<string, string> = { fish: 'Fish Audio', mimo: '小米 MiMo', openai: 'OpenAI 兼容' }

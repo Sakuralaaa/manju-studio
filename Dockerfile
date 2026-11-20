@@ -14,6 +14,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
 COPY colab/ ./colab/
+COPY docs/antigravity/ ./docs/antigravity/
 COPY --from=web /web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/manju-studio .
 

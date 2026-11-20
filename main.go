@@ -176,6 +176,7 @@ func routes(m *http.ServeMux) {
 	a("GET /api/keys", handleKeyList)
 	a("POST /api/keys", handleKeyCreate)
 	a("DELETE /api/keys/{id}", handleKeyDelete)
+	a("GET /api/antigravity/rules", handleAgentRules)
 
 	// 文件
 	a("GET /files/images/{name}", serveData("images"))
@@ -209,6 +210,7 @@ func routes(m *http.ServeMux) {
 	k("GET /v1/audio/{name}", extAudioFile)
 	k("GET /v1/images/{id}/file", extImageFile)
 	k("POST /mcp", handleMCP)
+	m.HandleFunc("GET /v1/dl/{token}", handleSignedDL) // 限时下载链接（令牌即授权），给外部编剧下载视频
 	m.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "POST")
 		httpErr(w, 405, "只支持 POST")

@@ -123,7 +123,7 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 结构对照开源项目 pyJianYingDraft（剪映 5.9 草稿格式）；填写本机草稿目录时素材写绝对路径，留空时用剪映的草稿占位前缀。解压到剪映草稿目录即可打开（未在剪映客户端实测）。
 
 **一键成集**：梗概 → 剧本 → 资产（提取、设定图、音色）→ 分镜 → 关键帧 → 配音 → 视频排队 → 成片 → 摘要与封面。
-「全自动」一路做完；「关键处问我」在剧本、资产、分镜之后暂停等确认。每一步先检查是否已完成，所以随时停下后可以继续；服务重启后自动接着跑。
+「全自动」一路做完；「关键处问我」在剧本、资产、分镜之后暂停等确认；「外部编剧」在梗概、剧本、分镜处停下（状态 `waiting_writer`），由 Antigravity 里的 Gemini 等外部智能体通过 MCP 写入后自动继续，应用不调用文本模型（见 [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md)）。每一步先检查是否已完成，所以随时停下后可以继续；服务重启后自动接着跑。
 视频只排队，是否开机由「算力 → 调度」里的「有排队视频时自动开机」决定（默认关闭）。
 
 ## 对外接口（给其他智能体）
@@ -132,7 +132,9 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 
 ### MCP
 
-可流式 HTTP 端点：`POST /mcp`（JSON-RPC 2.0，返回 `application/json`）。
+可流式 HTTP（Streamable HTTP）端点：`POST /mcp`（JSON-RPC 2.0，返回 `application/json`；`GET` 返回 405，不提供服务端 SSE 流；校验 `Origin` 与 `MCP-Protocol-Version`）。
+
+**Antigravity**：`mcp_config.json` 里写 `serverUrl` + `headers`（或用仓库里的 stdio 桥接 `cmd/manju-mcp-bridge`），工作区放规则文件 [docs/antigravity/AGENTS.md](docs/antigravity/AGENTS.md)。完整说明见 [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md)；「接口」页可一键复制配置和规则文件。
 
 ```json
 { "mcpServers": { "manju": { "type": "http", "url": "https://你的域名/mcp", "headers": { "Authorization": "Bearer <密钥>" } } } }
@@ -140,6 +142,17 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 
 | 工具 | 说明 |
 |---|---|
+| `get_writing_context` | 外部编剧先调用：设定集、前几集摘要与卡点、资产库（含角色固定造型）、本集状态、下一步 |
+| `save_bible` | 写设定集：世界观、人物小传（文本或人物数组）、分集总纲 |
+| `save_synopsis` | 写本集梗概 |
+| `save_script` | 写剧本：结构化分场（画面 / 台词含说话人与语气 / 旁白）+ 卡点，或整份 Markdown |
+| `save_shots` | 写（整体替换）分镜：时长、景别运镜、画面、台词、资产引用、衔接（cut / continuous / first_last）、关键帧与视频提示词 |
+| `save_episode_summary` | 写本集摘要与卡点 |
+| `upsert_asset` | 新建或更新角色 / 场景 / 道具；角色的固定造型（发型、五官、服装、配饰）会写进每张关键帧提示词 |
+| `view_asset_images` | 资产设定图 / 三视图 / 表情表，MCP 图片内容块（默认长边 ≤ 1536 的 JPEG，可要原图） |
+| `view_shot` | 镜头信息 + 关键帧 + 选定视频首尾帧（图片内容块） |
+| `listen_dub` | 台词配音，MCP 音频内容块 |
+| `get_video_link` | 视频 / 成片的限时下载地址与建议文件名（MCP 没有视频内容类型，下载到本地看） |
 | `colab_status` | 运行时状态、排队数、已用 CU 估算、订阅 |
 | `colab_specs` | 可用运行时规格与每小时 CU |
 | `colab_start` | 开机：`purpose=video`（需 GPU，自动准备视频环境）或 `manual`（仅开机，可选 CPU） |
@@ -152,7 +165,7 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `list_episodes` | 设定集与各集梗概、摘要、卡点、进度 |
 | `create_episode` | 新建下一集，`ai_idea=true` 自动拟定梗概 |
 | `get_episode` | 一集的剧本、摘要、步骤状态、分镜 |
-| `autopilot_start` | 一键成集，`mode=auto` / `ask` |
+| `autopilot_start` | 一键成集，`mode=auto` / `ask` / `writer`（外部编剧） |
 | `autopilot_status` | 一键成集进度与日志 |
 | `autopilot_continue` | 确认暂停点或从失败处重试 |
 | `autopilot_cancel` | 停止一键成集 |
@@ -187,6 +200,7 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | GET | `/v1/audio/{name}` | 下载音频 |
 | POST | `/v1/images` | `{prompt, channel_id, model, aspect, n}` |
 | GET | `/v1/images/{id}/file` | 下载图片 |
+| GET | `/v1/dl/{token}` | `get_video_link` 给出的限时下载地址（令牌即授权，2 小时有效） |
 
 ```bash
 curl -X POST https://你的域名/v1/videos \

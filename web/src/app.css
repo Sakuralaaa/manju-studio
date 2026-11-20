@@ -290,7 +290,7 @@
 .codeblock { margin: 0; padding: 12px 16px; border-radius: 12px; background: var(--well); font-family: var(--font); font-size: 12px; line-height: 20px; color: var(--text-2); white-space: pre; overflow-x: auto; }
 .tool-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
 .tool { display: flex; align-items: center; gap: 12px; min-height: 40px; border-bottom: 1px solid var(--line); min-width: 0; font-size: 13px; }
-.tool code { width: 136px; flex: none; font-family: var(--font); font-weight: 600; font-size: 12px; color: var(--accent-text); }
+.tool code { width: 160px; flex: none; font-family: var(--font); font-weight: 600; font-size: 12px; color: var(--accent-text); }
 .tool span { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rest { display: flex; flex-direction: column; }
 .rest-row { display: flex; align-items: center; gap: 12px; min-height: 40px; border-bottom: 1px solid var(--line); font-size: 13px; min-width: 0; }
@@ -382,7 +382,7 @@
 .ebody { padding: 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
 .ep-pipe { display: inline-flex; align-items: center; gap: 4px; color: var(--accent-text); font-weight: 500; }
 .ep-pipe.is-failed { color: var(--danger); }
-.ep-pipe.is-confirm, .ep-pipe.is-waiting { color: var(--warn); }
+.ep-pipe.is-confirm, .ep-pipe.is-waiting, .ep-pipe.is-waiting_writer { color: var(--warn); }
 .ecard-add { align-items: center; justify-content: center; gap: 8px; min-height: 240px; border-style: dashed; color: var(--text-2); font-size: 14px; font-weight: 500; background: transparent; }
 .ecard-add:hover { color: var(--accent-text); border-color: var(--accent); }
 .prev-cliff { padding: 12px 16px; margin-bottom: 16px; border-radius: 12px; background: var(--well); font-size: 13px; line-height: 20px; }
@@ -410,7 +410,7 @@
 .ap-head { display: flex; align-items: center; gap: 12px; min-width: 0; flex-wrap: wrap; }
 .ap-icon { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border-radius: var(--r-md); background: var(--accent-soft); color: var(--accent-text); }
 .ap-panel.is-failed .ap-icon { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
-.ap-panel.is-confirm .ap-icon, .ap-panel.is-waiting .ap-icon { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
+.ap-panel.is-confirm .ap-icon, .ap-panel.is-waiting .ap-icon, .ap-panel.is-waiting_writer .ap-icon { background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn); }
 .ap-title { display: flex; flex-direction: column; min-width: 0; flex: 1 1 200px; }
 .ap-title b { font-size: 14px; line-height: 20px; font-weight: 600; }
 .ap-title .muted { font-size: 13px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -423,7 +423,16 @@
 .ap-step.is-cur i { background: linear-gradient(90deg, var(--accent) 0 40%, var(--chip-hover) 40%); }
 .ap-step.is-cur.is-running i { animation: aprun 1.2s linear infinite; background: linear-gradient(90deg, var(--chip-hover), var(--accent), var(--chip-hover)) 0 0 / 200% 100%; }
 .ap-step.is-cur.is-failed i { background: var(--danger); }
-.ap-step.is-cur.is-confirm i, .ap-step.is-cur.is-waiting i { background: var(--warn); }
+.ap-step.is-cur.is-confirm i, .ap-step.is-cur.is-waiting i, .ap-step.is-cur.is-waiting_writer i { background: var(--warn); }
+.ap-chip.is-writer { color: var(--accent-text); font-weight: 500; }
+.ap-note { margin: 12px 0 0; font-size: 13px; line-height: 20px; color: var(--text-2); }
+.ap-writer { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--r-md); background: var(--well); font-size: 13px; line-height: 20px; color: var(--text-2); min-width: 0; }
+.ap-writer svg { flex: none; color: var(--accent-text); }
+.ap-writer span { flex: 1; min-width: 0; }
+.ap-writer b { color: var(--text); font-weight: 600; }
+.ag-steps { margin: 0; padding-left: 20px; font-size: 13px; line-height: 22px; color: var(--text-2); }
+.ag-steps code { font-family: var(--font); font-size: 12px; color: var(--accent-text); }
+.ag-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 @keyframes aprun { to { background-position: -200% 0; } }
 
 /* 资产：定妆与音色 */

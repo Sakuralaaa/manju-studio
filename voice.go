@@ -690,6 +690,10 @@ func draftVoiceDesc(ctx context.Context, p *Project, a *Asset) (string, string, 
 		}
 		rows.Close()
 	}
+	if d := strings.TrimSpace(a.Voice.Desc); d != "" && a.Voice.Mode == "" {
+		// 外部编剧写好的音色描述（upsert_asset 的 voice_description）
+		return d, orDefault(strings.TrimSpace(a.Voice.SampleText), orDefault(sample, "你好，很高兴认识你。")), nil
+	}
 	ch, model, err := textChannelFor(p)
 	if err != nil {
 		// 没有文本渠道：用外貌描述拼一句

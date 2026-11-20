@@ -60,7 +60,7 @@ export default function ProjectPage({ id }: { id: number }) {
     } catch (e: any) { setErr(e.message) }
   }, [id])
   useEffect(() => { reload() }, [reload])
-  const pipeOn = !!data?.pipeline && ['running', 'waiting'].includes(data.pipeline.status)
+  const pipeOn = !!data?.pipeline && ['running', 'waiting', 'waiting_writer'].includes(data.pipeline.status)
   const busy = !!data && (data.tasks.some(t => t.status === 'running') || data.steps.queued > 0 || pipeOn)
   useInterval(reload, busy ? 2000 : 15000)
   const run = useRunner(reload)

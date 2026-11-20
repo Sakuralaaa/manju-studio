@@ -24,7 +24,7 @@ type Pipe struct {
 	ID        int64     `json:"id"`
 	EpisodeID int64     `json:"episode_id"`
 	Mode      string    `json:"mode"`
-	Status    string    `json:"status"` // running / confirm / waiting / done / failed / canceled
+	Status    string    `json:"status"` // running / confirm / waiting / waiting_writer / done / failed / canceled
 	Stage     string    `json:"stage"`
 	Message   string    `json:"message"`
 	Confirmed []string  `json:"confirmed"`
@@ -89,10 +89,10 @@ func (p *Pipe) say(format string, a ...any) {
 }
 
 func startPipe(eid int64, mode string) (*Pipe, error) {
-	if lp := latestPipe(eid); lp != nil && (lp.Status == "running" || lp.Status == "waiting" || lp.Status == "confirm") {
+	if lp := latestPipe(eid); lp != nil && (lp.Status == "running" || lp.Status == "waiting" || lp.Status == "confirm" || lp.Status == "waiting_writer") {
 		return nil, errors.New("这一集已经在一键成集中")
 	}
-	if mode != "ask" {
+	if mode != "ask" && mode != "writer" {
 		mode = "auto"
 	}
 	res, err := db.Exec(`INSERT INTO pipelines(episode_id,mode,status,started_at,updated_at) VALUES(?,?, 'running', ?, ?)`, eid, mode, now(), now())
@@ -101,7 +101,7 @@ func startPipe(eid int64, mode string) (*Pipe, error) {
 	}
 	id, _ := res.LastInsertId()
 	p := getPipe(id)
-	p.say("开始一键成集（%s）", map[string]string{"auto": "全自动", "ask": "关键处问我"}[mode])
+	p.say("开始一键成集（%s）", map[string]string{"auto": "全自动", "ask": "关键处问我", "writer": "外部编剧"}[mode])
 	go runPipe(id)
 	return p, nil
 }
@@ -116,7 +116,7 @@ func cancelPipe(eid int64) {
 		c()
 	}
 	pipeMu.Unlock()
-	if lp.Status == "running" || lp.Status == "waiting" || lp.Status == "confirm" {
+	if lp.Status == "running" || lp.Status == "waiting" || lp.Status == "confirm" || lp.Status == "waiting_writer" {
 		lp.Status, lp.Message = "canceled", "已停止"
 		lp.say("已停止")
 	}
@@ -280,8 +280,12 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 	if err != nil {
 		return err
 	}
+	writer := pp.Mode == "writer"
 	// 1. 梗概
-	if strings.TrimSpace(e.Idea) == "" && (e.No > 1 || strings.TrimSpace(p.Idea) == "") {
+	if writer && strings.TrimSpace(e.Idea) == "" && strings.TrimSpace(e.Script) == "" && (e.No > 1 || strings.TrimSpace(p.Idea) == "") {
+		return pp.waitWriter("idea", "等外部编剧写本集梗概（save_synopsis）")
+	}
+	if !writer && strings.TrimSpace(e.Idea) == "" && (e.No > 1 || strings.TrimSpace(p.Idea) == "") {
 		if strings.TrimSpace(p.Idea) == "" && p.Outline == "" {
 			return errors.New("先在作品设定里写下故事创意")
 		}
@@ -292,6 +296,13 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 		p, e, _ = reload()
 	}
 	// 2. 剧本
+	if writer && strings.TrimSpace(e.Script) == "" {
+		return pp.waitWriter("script", "等外部编剧写剧本（save_script）")
+	}
+	// 外部编剧：资产由编剧 upsert_asset 建好，分镜由 save_shots 交回，然后才出资产图
+	if writer && len(listShots(e.ID, false)) == 0 {
+		return pp.waitWriter("storyboard", "等外部编剧补齐资产并交分镜（upsert_asset、save_shots）")
+	}
 	if strings.TrimSpace(e.Script) == "" {
 		pp.setStage("script", "写剧本")
 		if err := runAndWait(ctx, p.ID, "script", func() (int64, error) { return scriptTask(p, e, "") }); err != nil {
@@ -303,7 +314,7 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 		return err
 	}
 	// 3. 资产
-	if !contains(pp.Confirmed, "extracted") {
+	if !writer && !contains(pp.Confirmed, "extracted") {
 		pp.setStage("assets", "从剧本提取资产")
 		if err := runAndWait(ctx, p.ID, "extract", func() (int64, error) { return extractTask(p, e) }); err != nil {
 			return fmt.Errorf("提取资产失败：%w", err)
@@ -323,6 +334,9 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 		if err := waitIdle(ctx, p.ID, "image"); err != nil {
 			return err
 		}
+	}
+	if writer && len(listAssets(p.ID)) == 0 {
+		return pp.waitWriter("storyboard", "资产库是空的：等外部编剧用 upsert_asset 建角色和场景")
 	}
 	var noImg []string
 	for _, a := range listAssets(p.ID) {
@@ -470,9 +484,17 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 	}
 	// 9. 摘要与封面
 	p, e, _ = reload()
-	pp.setStage("wrap", "写本集摘要")
-	if err := runAndWait(ctx, p.ID, "summary", func() (int64, error) { return summaryTask(p, e) }); err != nil {
-		pp.say("摘要没写成：%s", err.Error())
+	switch {
+	case writer && strings.TrimSpace(e.Summary) != "":
+		pp.say("本集摘要已由外部编剧写好")
+	case writer:
+		// 外部编剧模式不调用文本模型
+		pp.say("本集摘要留给外部编剧（save_episode_summary）")
+	default:
+		pp.setStage("wrap", "写本集摘要")
+		if err := runAndWait(ctx, p.ID, "summary", func() (int64, error) { return summaryTask(p, e) }); err != nil {
+			pp.say("摘要没写成：%s", err.Error())
+		}
 	}
 	if e.CoverImageID == 0 {
 		pp.setStage("wrap", "生成封面")
@@ -513,6 +535,8 @@ func handlePipeContinue(w http.ResponseWriter, r *http.Request) {
 	case "confirm":
 		lp.Confirmed = append(lp.Confirmed, lp.Stage)
 		lp.say("已确认")
+	case "waiting_writer":
+		lp.say("手动继续")
 	case "failed", "canceled":
 		lp.say("继续")
 	default:
