@@ -128,6 +128,14 @@ func synthesize(ctx context.Context, ch *Channel, v VoiceSpec, text, emotion str
 	}
 	switch ch.APIType {
 	case "fish":
+		if v.Voice == "" && v.Sample != "" {
+			// 设计出来的样本：第一次用时在 Fish 建私有音色
+			id, err := fishModelFromSample(ctx, ch, v.Sample, v.Title)
+			if err != nil {
+				return nil, "", err
+			}
+			v.Voice = id
+		}
 		if v.Voice == "" {
 			return nil, "", errors.New("还没有选 Fish 音色")
 		}
@@ -780,12 +788,10 @@ func handleVoiceDesign(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "先写音色描述")
 		return
 	}
-	ch, err := voiceChannel(in.ChannelID)
-	if err != nil || ch.APIType != "mimo" {
-		if ch = firstVoiceChannel("mimo"); ch == nil {
-			httpErr(w, 400, "设计音色需要一个小米 MiMo 语音渠道")
-			return
-		}
+	ch, err := designVoiceChannel(in.ChannelID)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
 	}
 	n := clampInt(in.N, 1, 3)
 	text := orDefault(strings.TrimSpace(in.Text), "你好，很高兴认识你。接下来的故事，由我来讲给你听。")
@@ -796,32 +802,19 @@ func handleVoiceDesign(w http.ResponseWriter, r *http.Request) {
 		URL      string  `json:"url"`
 		Duration float64 `json:"duration"`
 	}
-	out := make([]*cand, n)
-	errs := make([]error, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			name, dur, err := designOnce(ctx, ch, strings.TrimSpace(in.Desc), text)
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			out[i] = &cand{Sample: name, URL: "/files/audio/" + name, Duration: dur}
-		}(i)
+	names, durs, err := designCandidates(ctx, ch, strings.TrimSpace(in.Desc), text, n)
+	reqs := n
+	if ch.APIType == "fish" {
+		reqs = 1
 	}
-	wg.Wait()
-	ledgerAdd(in.ProjectID, 0, "tts", n, 0, 0, 0, "")
-	res := []*cand{}
-	for _, c := range out {
-		if c != nil {
-			res = append(res, c)
-		}
-	}
-	if len(res) == 0 {
-		httpErr(w, 400, errs[0].Error())
+	ledgerAdd(in.ProjectID, 0, "tts", reqs, 0, 0, 0, "")
+	if err != nil {
+		httpErr(w, 400, err.Error())
 		return
+	}
+	res := []*cand{}
+	for i, nm := range names {
+		res = append(res, &cand{Sample: nm, URL: "/files/audio/" + nm, Duration: durs[i]})
 	}
 	writeJSON(w, map[string]any{"channel_id": ch.ID, "candidates": res, "text": text})
 }
@@ -1140,9 +1133,9 @@ func fishSimple(w http.ResponseWriter, req *http.Request) {
 // ---------- 一键为全部角色设计音色 ----------
 
 func designAllTask(p *Project) (int64, error) {
-	ch := firstVoiceChannel("mimo")
-	if ch == nil {
-		return 0, errors.New("设计音色需要一个小米 MiMo 语音渠道")
+	ch, err := designVoiceChannel(0)
+	if err != nil {
+		return 0, err
 	}
 	var todo []*Asset
 	for _, a := range listAssets(p.ID) {
@@ -1159,12 +1152,15 @@ func designAllTask(p *Project) (int64, error) {
 		for _, a := range todo {
 			desc, text, err := draftVoiceDesc(ctx, p, a)
 			if err == nil {
-				var name string
-				name, _, err = designOnce(ctx, ch, desc, text)
+				var names []string
+				names, _, err = designCandidates(ctx, ch, desc, text, 1)
 				ledgerAdd(p.ID, 0, "tts", 1, 0, 0, 0, "")
 				if err == nil {
-					v := VoiceSpec{ChannelID: ch.ID, Mode: "design", Title: a.Name + "的声音", Desc: desc, Sample: name, SampleText: text, Speed: 1}
-					_, err = db.Exec(`UPDATE assets SET voice=? WHERE id=?`, mustJSON(v), a.ID)
+					var v VoiceSpec
+					v, err = designedVoiceSpec(ctx, ch, names[0], a.Name+"的声音", desc, text)
+					if err == nil {
+						_, err = db.Exec(`UPDATE assets SET voice=? WHERE id=?`, mustJSON(v), a.ID)
+					}
 				}
 			}
 			if err != nil {
@@ -1173,8 +1169,13 @@ func designAllTask(p *Project) (int64, error) {
 		}
 		if needNarr {
 			desc := "成熟稳重的中年男声旁白，普通话标准，音色低沉有磁性，语速平稳，带一点悬疑感，适合讲故事。"
-			if name, _, err := designOnce(ctx, ch, desc, "那一夜之后，一切都变了。没有人知道，真正的秘密才刚刚开始。"); err == nil {
-				v := VoiceSpec{ChannelID: ch.ID, Mode: "design", Title: "旁白", Desc: desc, Sample: name, Speed: 1}
+			nt := "那一夜之后，一切都变了。没有人知道，真正的秘密才刚刚开始。"
+			names, _, err := designCandidates(ctx, ch, desc, nt, 1)
+			var v VoiceSpec
+			if err == nil {
+				v, err = designedVoiceSpec(ctx, ch, names[0], "旁白", desc, nt)
+			}
+			if err == nil {
 				_, _ = db.Exec(`UPDATE projects SET narrator_voice=? WHERE id=?`, mustJSON(v), p.ID)
 			} else {
 				fails = append(fails, "旁白："+err.Error())

@@ -831,6 +831,14 @@ var mcpTools = []mcpTool{
 	{"tts", "用角色音色（asset_id）或指定音色合成一句话，返回音频地址。", obj(map[string]any{
 		"text": str("要念的文字"), "emotion": str("语气，如：压低声音、愤怒"), "asset_id": num("角色资产编号"), "voice": map[string]any{"type": "object", "description": "音色：channel_id、mode（fish / builtin / design / clone / openai）、voice、sample、speed、pitch"},
 	}, "text")},
+	{"design_voice", "按文字描述设计角色音色（或旁白音色）：返回 1–4 个候选试听地址和样本名，不会改角色的音色。听完用 set_voice 选定。description 不填就用角色已存的音色描述（upsert_asset 的 voice_description）。有小米 MiMo 渠道用 MiMo，否则用 Fish Audio。", obj(map[string]any{
+		"asset_id": num("角色资产编号（给旁白设计时不填，填 project_id）"), "project_id": num("作品编号（旁白）"), "description": str("音色描述：性别、年龄感、音色质感、语速、性格、口音"),
+		"sample_text": str("试音台词（150 字以内）"), "n": num("候选个数 1–4，默认 3"), "channel_id": num("语音渠道编号（可选）"),
+	})},
+	{"set_voice", "把 design_voice 的一个候选设为角色（或旁白）的音色；用 Fish 时会在 Fish 建一个私有音色。也可以直接给 voice 对象。之后配音都用它。", obj(map[string]any{
+		"asset_id": num("角色资产编号"), "project_id": num("作品编号（设旁白时填，且不填 asset_id）"), "sample": str("design_voice 返回的样本名"), "channel_id": num("design_voice 返回的渠道编号"),
+		"description": str("这段音色的描述（记下来以后改用）"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
+	})},
 	{"list_image_channels", "列出生图渠道：渠道编号、可用模型、参考图上限。指定渠道和模型出图前先看这个。", obj(map[string]any{})},
 	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。", obj(map[string]any{
 		"prompt": str("提示词。带参考图时写清每张参考图是谁、参考什么，如「参考图1是同一个人，脸型五官保持一致，只改发型和服装」"), "channel_id": num("渠道编号（list_image_channels），不填用第一个生图渠道"), "model": str("模型名，不填用渠道的第一个模型"),
@@ -1079,6 +1087,13 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 			return toolLines(ctx, id, a.Force)
 		}
 		return toolAutopilot(ctx, strings.TrimPrefix(name, "autopilot_"), pipeArgs{EpisodeID: id, Mode: a.Mode})
+	case "design_voice", "set_voice":
+		var a voiceToolArgs
+		_ = json.Unmarshal(args, &a)
+		if name == "design_voice" {
+			return toolDesignVoice(ctx, a, base)
+		}
+		return toolSetVoice(ctx, a)
 	case "tts":
 		var a ttsArgs
 		_ = json.Unmarshal(args, &a)
@@ -1145,3 +1160,121 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 
 var _ = base64.StdEncoding
 var _ = os.Remove
+
+type voiceToolArgs struct {
+	AssetID     int64      `json:"asset_id"`
+	ProjectID   int64      `json:"project_id"`
+	Description string     `json:"description"`
+	SampleText  string     `json:"sample_text"`
+	N           int        `json:"n"`
+	ChannelID   int64      `json:"channel_id"`
+	Sample      string     `json:"sample"`
+	Voice       *VoiceSpec `json:"voice"`
+}
+
+func toolDesignVoice(ctx context.Context, a voiceToolArgs, base string) (any, error) {
+	desc, text := strings.TrimSpace(a.Description), strings.TrimSpace(a.SampleText)
+	pid := a.ProjectID
+	if a.AssetID > 0 {
+		as, err := getAsset(a.AssetID)
+		if err != nil || as.Kind != "character" {
+			return nil, errors.New("角色不存在")
+		}
+		pid = as.ProjectID
+		if desc == "" {
+			desc = strings.TrimSpace(as.Voice.Desc)
+		}
+		if text == "" {
+			text = strings.TrimSpace(as.Voice.SampleText)
+		}
+	}
+	if desc == "" {
+		return nil, errors.New("需要 description（或先用 upsert_asset 写 voice_description）")
+	}
+	text = orDefault(text, "你好，很高兴认识你。接下来的故事，由我来讲给你听。")
+	ch, err := designVoiceChannel(a.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	n := a.N
+	if n <= 0 {
+		n = 3
+	}
+	c, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+	names, durs, err := designCandidates(c, ch, desc, text, clampInt(n, 1, 4))
+	reqs := clampInt(n, 1, 4)
+	if ch.APIType == "fish" {
+		reqs = 1
+	}
+	ledgerAdd(pid, 0, "tts", reqs, 0, 0, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	out := []map[string]any{}
+	for i, nm := range names {
+		out = append(out, map[string]any{"sample": nm, "url": base + "/v1/audio/" + nm, "duration": durs[i]})
+	}
+	return map[string]any{"channel_id": ch.ID, "channel": ch.APIType, "description": desc, "sample_text": text, "candidates": out}, nil
+}
+
+func toolSetVoice(ctx context.Context, a voiceToolArgs) (any, error) {
+	var as *Asset
+	var p *Project
+	if a.AssetID > 0 {
+		x, err := getAsset(a.AssetID)
+		if err != nil || x.Kind != "character" {
+			return nil, errors.New("角色不存在")
+		}
+		as = x
+	} else if a.ProjectID > 0 {
+		x, err := getProject(a.ProjectID)
+		if err != nil {
+			return nil, errors.New("作品不存在")
+		}
+		p = x
+	} else {
+		return nil, errors.New("需要 asset_id 或 project_id")
+	}
+	var v VoiceSpec
+	if a.Voice != nil {
+		v = *a.Voice
+	} else {
+		if strings.TrimSpace(a.Sample) == "" || strings.ContainsAny(a.Sample, "/\\") {
+			return nil, errors.New("需要 design_voice 返回的 sample")
+		}
+		ch, err := designVoiceChannel(a.ChannelID)
+		if err != nil {
+			return nil, err
+		}
+		title := "旁白"
+		desc := strings.TrimSpace(a.Description)
+		if as != nil {
+			title = as.Name + "的声音"
+			if desc == "" {
+				desc = as.Voice.Desc
+			}
+		}
+		text := ""
+		if t, err := os.ReadFile(filepath.Join(dataDir, "audio", a.Sample+".txt")); err == nil {
+			text = strings.TrimSpace(string(t))
+		}
+		c, cancel := context.WithTimeout(ctx, 4*time.Minute)
+		defer cancel()
+		v, err = designedVoiceSpec(c, ch, a.Sample, title, desc, text)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if v.empty() {
+		return nil, errors.New("音色不完整")
+	}
+	if as != nil {
+		_, _ = db.Exec(`UPDATE assets SET voice=? WHERE id=?`, mustJSON(v), as.ID)
+		touchProject(as.ProjectID)
+		return map[string]any{"ok": true, "asset_id": as.ID, "voice": v}, nil
+	}
+	_, _ = db.Exec(`UPDATE projects SET narrator_voice=? WHERE id=?`, mustJSON(v), p.ID)
+	touchProject(p.ID)
+	return map[string]any{"ok": true, "project_id": p.ID, "narrator_voice": v}, nil
+}

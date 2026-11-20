@@ -101,7 +101,7 @@ description: 漫剧工坊外部编剧规则
 | `listen_dub` | 台词配音：`{"type":"audio","data":<base64>,"mimeType":"audio/mpeg"}`（MCP 2025-03-26 起支持音频块；客户端协商 2024-11-05 时改给音频地址），每次最多 8 段、合计 ≤ 10 MB |
 | `get_video_link` | 视频的限时下载地址（2 小时，不需要密钥）+ 建议文件名。**MCP 没有视频内容类型**，请让智能体用 `curl -fL -o <filename> "<url>"` 下载到工作区再看 |
 
-原有工具（`list_projects`、`list_episodes`、`create_episode`、`get_episode`、`autopilot_*`、`generate_dub`、`tts`、`image_generate`、`colab_*`、`video_*`）不变。
+原有工具（`list_projects`、`list_episodes`、`create_episode`、`get_episode`、`autopilot_*`、`generate_dub`、`tts`、`design_voice`、`set_voice`、`image_generate`、`colab_*`、`video_*`）不变。
 
 ## 5. Streamable HTTP 实现说明
 

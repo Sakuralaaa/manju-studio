@@ -29,7 +29,7 @@ export function VoicePanel({ value, name, assetId, onClose, onSave }: { value: V
   const oai = vchs.filter(c => c.api_type === 'openai')
   const narrow = useMedia('(max-width: 720px)')
   const tabs = ([
-    { value: 'design', label: narrow ? '设计' : '设计音色', ok: mimo.length > 0 },
+    { value: 'design', label: narrow ? '设计' : '设计音色', ok: mimo.length + fish.length > 0 },
     { value: 'fish', label: '音色库', ok: fish.length > 0 },
     { value: 'clone', label: narrow ? '克隆' : '克隆音色', ok: mimo.length + fish.length > 0 },
     { value: 'builtin', label: narrow ? '内置' : '内置音色', ok: mimo.length > 0 },
@@ -65,7 +65,7 @@ export function VoicePanel({ value, name, assetId, onClose, onSave }: { value: V
       </>}>
       <Segmented value={tab} onChange={x => setTab(x as Tab)} options={tabs.map(t => ({ value: t.value, label: t.label }))} />
       <div className="vbody">
-        {tab === 'design' && <DesignTab chs={mimo} name={name} assetId={assetId} v={v} setV={setV} text={text} setText={setText} />}
+        {tab === 'design' && <DesignTab chs={[...mimo, ...fish]} name={name} assetId={assetId} v={v} setV={setV} text={text} setText={setText} />}
         {tab === 'fish' && <FishTab chs={fish} v={v} setV={setV} />}
         {tab === 'clone' && <CloneTab chs={[...mimo, ...fish]} name={name} v={v} setV={setV} />}
         {tab === 'builtin' && <BuiltinTab chs={mimo} v={v} setV={setV} text={text} />}
