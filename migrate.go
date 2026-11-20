@@ -179,5 +179,28 @@ func migrate() error {
 			_, _ = db.Exec(q, eid, o.id)
 		}
 	}
+	migrateSizeB64()
 	return nil
+}
+
+// migrateSizeB64 一次性：已建好的「尺寸型」生图渠道（尺寸原生、比例不用、逐张请求、要链接）
+// 改为直接返回图片数据——该类中转的图片链接下载会 401。上游不认时出图会自动退回链接。
+func migrateSizeB64() {
+	if getSetting("mig_size_b64", "") != "" {
+		return
+	}
+	cs, err := listChannels()
+	if err != nil {
+		return
+	}
+	for _, c := range cs {
+		r := c.Caps.Response
+		if c.Kind != "image" || c.APIType != "images" || c.Caps.Size.Mode != "native" || c.Caps.Aspect.Mode != "off" ||
+			c.Caps.N.Mode != "loop" || r.Mode != "native" || len(r.Values) != 1 || r.Values[0] != "url" {
+			continue
+		}
+		c.Caps.Response.Values = []string{"b64_json"}
+		_, _ = db.Exec(`UPDATE channels SET caps=? WHERE id=?`, mustJSON(c.Caps), c.ID)
+	}
+	_ = setSetting("mig_size_b64", "1")
 }

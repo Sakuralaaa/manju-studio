@@ -14,7 +14,7 @@ export const modeLabels: Record<string, string> = {
 
 const valueMap: Record<string, string> = {
   auto: '自动', low: '低', medium: '中', high: '高', xhigh: '超高', max: '极致', standard: '标准', hd: '高清',
-  transparent: '透明', opaque: '不透明', url: '链接', b64_json: '内嵌数据',
+  transparent: '透明', opaque: '不透明', url: '返回图片链接', b64_json: '直接返回图片数据',
   png: 'PNG', jpeg: 'JPEG', webp: 'WEBP', '1k': '1K', '2k': '2K', '4k': '4K', '1.5k': '1.5K',
 }
 export const moderationMap: Record<string, string> = { auto: '标准', low: '宽松' }

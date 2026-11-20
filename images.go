@@ -153,6 +153,12 @@ func generateImages(ctx context.Context, ch *Channel, model, prompt string, p Pa
 			time.Sleep(2 * time.Second)
 			res, err = doCall(ctx, ch, plan, refs)
 		}
+		if err != nil && ctx.Err() == nil && isResponseFormatRejected(plan, err) {
+			// 上游不认「直接返回图片数据」：改要链接再下载（同主机会带渠道密钥重试）
+			log.Printf("渠道 %d 不支持 b64_json，改用链接", ch.ID)
+			plan = planWithURL(plan)
+			res, err = doCall(ctx, ch, plan, refs)
+		}
 		if err != nil {
 			lastErr = err
 			if i == 0 && plan.Calls > 1 {

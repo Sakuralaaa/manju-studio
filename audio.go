@@ -167,10 +167,10 @@ func coverTask(p *Project, e *Episode, title string) (int64, error) {
 	var refs []refFile
 	var who []string
 	assets := listAssets(p.ID)
-	// 主角（全剧出场最多的角色）+ 本集第一个场景作参考
+	// 主角（全剧出场最多的角色）+ 本集第一个场景作参考；主角优先用定妆三视图
 	var lead, scene *Asset
 	for _, a := range assets {
-		if a.Kind == "character" && a.PickedImageID > 0 && (lead == nil || a.Appear > lead.Appear) {
+		if id, _ := charRefImage(a); a.Kind == "character" && id > 0 && (lead == nil || a.Appear > lead.Appear) {
 			lead = a
 		}
 	}
@@ -183,27 +183,39 @@ func coverTask(p *Project, e *Episode, title string) (int64, error) {
 			}
 		}
 	}
+	if lead == nil {
+		// 还没有任何角色图：至少把出场最多的角色造型写进提示词
+		for _, a := range assets {
+			if a.Kind == "character" && (lead == nil || a.Appear > lead.Appear) {
+				lead = a
+			}
+		}
+	}
 	limit := refLimit(ch)
+	kinds := map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}
 	for _, a := range []*Asset{lead, scene} {
 		if a == nil || len(refs) >= limit {
 			continue
 		}
-		id := a.PickedImageID
-		if a.SheetImageID > 0 && a.Kind == "character" {
-			id = a.SheetImageID
+		id, note := charRefImage(a)
+		if id == 0 {
+			continue
 		}
 		if im, err := getImage(id); err == nil {
 			if rf, err := readImageRef(im); err == nil {
 				refs = append(refs, rf)
-				who = append(who, fmt.Sprintf("参考图%d是「%s」", len(refs), a.Name))
+				who = append(who, refNote(len(refs), kinds[a.Kind], a.Name, note, true))
 			}
 		}
 	}
 	gist := strings.TrimRight(strings.TrimSpace(orDefault(e.Summary, orDefault(e.Idea, p.Idea))), "。.！!？?；;，, ")
-	prompt := fmt.Sprintf("竖屏短剧海报封面。画面风格：%s。主视觉：%s。画面上方用醒目的中文艺术字写出标题「%s」，标题下方用较小的字写「%s」，文字清晰、无错别字、不出现其他文字。电影海报级构图与光影，人物情绪强烈。",
+	prompt := fmt.Sprintf("竖屏短剧海报封面。画面风格：%s。主视觉：%s。画面上方用醒目的中文艺术字写出标题「%s」，标题下方用较小的字写「%s」，文字清晰、无错别字、不出现其他文字，标题只在画面上方出现一次，画中的信纸、招牌等物件上不写字。电影海报级构图与光影，人物情绪强烈。",
 		orDefault(p.Style, "精致国漫"), gist, title, sub)
+	if l := lookLine(p, lead); l != "" {
+		prompt += l + "。"
+	}
 	if len(who) > 0 {
-		prompt += strings.Join(who, "，") + "，人物外貌与参考图一致。"
+		prompt += strings.Join(who, "，") + "；人物的脸、发型、服装与参考图完全一致。"
 	}
 	params := paramsFor(ch, p.Aspect, 1)
 	return startTask(p.ID, e.ID, "cover", "episode", e.ID, func(ctx context.Context) error {

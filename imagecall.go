@@ -186,8 +186,12 @@ func buildPlan(ch *Channel, in JobIn, hasRefs bool) Plan {
 		body["moderation"] = p.Moderation
 	}
 	// 返回方式
-	if c.Response.Mode == "native" && len(c.Response.Values) > 0 && ch.APIType == "images" {
-		body["response_format"] = c.Response.Values[0]
+	if c.Response.Mode == "native" && ch.APIType == "images" {
+		rf := "b64_json" // 界面默认「直接返回图片数据」
+		if len(c.Response.Values) > 0 && c.Response.Values[0] != "" {
+			rf = c.Response.Values[0]
+		}
+		body["response_format"] = rf
 	}
 	// 张数
 	n := p.N
@@ -550,6 +554,29 @@ func logURL(ref string) string {
 		return ref[:120]
 	}
 	return ref
+}
+
+// isResponseFormatRejected 请求了 b64_json 而上游以 4xx 拒绝、且报错点名返回格式
+func isResponseFormatRejected(plan Plan, err error) bool {
+	if plan.Body["response_format"] != "b64_json" {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	if !strings.HasPrefix(m, "上游返回 4") {
+		return false
+	}
+	return strings.Contains(m, "response_format") || strings.Contains(m, "b64") || strings.Contains(m, "response format")
+}
+
+// planWithURL 复制一份请求，返回方式改为链接
+func planWithURL(plan Plan) Plan {
+	body := make(map[string]any, len(plan.Body))
+	for k, v := range plan.Body {
+		body[k] = v
+	}
+	body["response_format"] = "url"
+	plan.Body = body
+	return plan
 }
 
 // isRetryable 上游 5xx 偶发错误自动重试一次

@@ -108,8 +108,10 @@ func presets() []Preset {
 				Compression: off,
 				Background:  off,
 				Moderation:  off,
-				Response:    Cap{Mode: "native", Values: []string{"url"}},
-				Refs:        Cap{Mode: "multipart", Max: 20}, // 实测上限 20
+				// 实测（2026-11-20）：该中转返回的 /images/... 链接下载要会话凭据（401），改为直接返回图片数据；
+				// 若上游不认 b64_json 或仍给链接，会自动退回下载链接
+				Response: Cap{Mode: "native", Values: []string{"b64_json"}},
+				Refs:     Cap{Mode: "multipart", Max: 20}, // 实测上限 20
 			},
 		},
 		{

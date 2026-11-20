@@ -294,7 +294,7 @@ function ChannelEditor({ initial, onClose, onSaved }: { initial: Partial<Channel
                     <label className="cap-max"><span>上限</span><input className="input" type="number" min={k === 'n' ? 1 : 0} max={k === 'n' ? 16 : 32} value={cap.max ?? 0} onChange={e => setCap(k, { max: Number(e.target.value) })} /></label>
                   )}
                   {!off && k === 'response' && (
-                    <Segmented size="sm" value={cap.values?.[0] || 'url'} onChange={v => setCap(k, { values: [v] })} options={[{ value: 'url', label: '链接' }, { value: 'b64_json', label: '内嵌数据' }]} />
+                    <Segmented size="sm" value={cap.values?.[0] || 'b64_json'} onChange={v => setCap(k, { values: [v] })} options={[{ value: 'b64_json', label: '直接返回图片数据' }, { value: 'url', label: '返回图片链接' }]} />
                   )}
                 </div>
                 {!off && capCommon[k] && (

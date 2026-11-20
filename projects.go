@@ -448,16 +448,50 @@ func assetPrompt(p *Project, a *Asset, tag string) string {
 	}
 	if f := lookFrame[tag]; f != "" {
 		parts = append(parts, f, body)
-		if a.PickedImageID > 0 {
-			parts = append(parts, "参考图1是这个角色的设定图，脸、发型、服装必须与参考图完全一致")
-		}
 	} else {
 		parts = append(parts, assetFrame[a.Kind], body)
 	}
-	if a.Kind == "character" && a.Description != "" && !strings.Contains(body, a.Description) {
+	if l := lookLine(p, a); l != "" {
+		parts = append(parts, l)
+	} else if a.Kind == "character" && a.Description != "" && !strings.Contains(body, a.Description) {
 		parts = append(parts, "外貌："+a.Description)
 	}
+	if notes := assetRefNotes(a, tag); len(notes) > 0 {
+		parts = append(parts, strings.Join(notes, "，")+"；脸、发型、服装必须与参考图完全一致")
+	}
 	return strings.Join(parts, "。")
+}
+
+// assetRefIDs 定妆图的参考：三视图以设定图为参考；表情表与重画设定图优先用三视图，再加设定图
+func assetRefIDs(a *Asset, tag string) ([]int64, []string) {
+	if a.Kind != "character" {
+		return nil, nil
+	}
+	var ids []int64
+	var notes []string
+	switch tag {
+	case "sheet":
+		if a.PickedImageID > 0 {
+			ids, notes = append(ids, a.PickedImageID), append(notes, "设定图")
+		}
+	default: // expr / 重画设定图
+		if a.SheetImageID > 0 {
+			ids, notes = append(ids, a.SheetImageID), append(notes, "定妆三视图")
+		}
+		if a.PickedImageID > 0 && tag == "expr" {
+			ids, notes = append(ids, a.PickedImageID), append(notes, "设定图")
+		}
+	}
+	return ids, notes
+}
+
+func assetRefNotes(a *Asset, tag string) []string {
+	_, kinds := assetRefIDs(a, tag)
+	var out []string
+	for i, k := range kinds {
+		out = append(out, refNote(i+1, "这个角色", a.Name, k, false))
+	}
+	return out
 }
 
 func assetAspect(kind, tag, projectAspect string) string {
@@ -488,8 +522,12 @@ func genAssetTask(p *Project, a *Asset, n int, tag string) (int64, error) {
 	prompt := assetPrompt(p, a, tag)
 	params := paramsFor(ch, assetAspect(a.Kind, tag, p.Aspect), n)
 	var refs []refFile
-	if tag != "" && a.PickedImageID > 0 {
-		if im, err := getImage(a.PickedImageID); err == nil {
+	ids, _ := assetRefIDs(a, tag)
+	if lim := refLimit(ch); len(ids) > lim {
+		ids = ids[:lim]
+	}
+	for _, id := range ids {
+		if im, err := getImage(id); err == nil {
 			if rf, err := readImageRef(im); err == nil {
 				refs = append(refs, rf)
 			}
@@ -860,7 +898,7 @@ func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 	var chars, others []cand
 	for i, c := range s.Assets {
 		a := byCode[c]
-		if a == nil || a.PickedImageID == 0 {
+		if id, _ := charRefImage(a); id == 0 {
 			continue
 		}
 		sc := float64(a.Appear) - float64(i)*0.01
@@ -896,10 +934,10 @@ func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 		}
 	}
 	for i, c := range chars {
-		img := c.a.PickedImageID
-		note := "设定图"
-		if c.a.SheetImageID > 0 && (i == 0 || limit >= len(chars)+len(others)+1) {
-			img, note = c.a.SheetImageID, "定妆三视图"
+		// 主角、以及参考图位置够用时每个角色都用定妆三视图；否则用设定图（单人全身，占画面更少）
+		img, note := charRefImage(c.a)
+		if c.a.PickedImageID > 0 && note == "定妆三视图" && !(i == 0 || limit >= len(chars)+len(others)+1) {
+			img, note = c.a.PickedImageID, "设定图"
 		}
 		add(c.a.Code, c.a.Name, kinds[c.a.Kind], img, note)
 		if i == 0 && s.Chain == "ref" {
@@ -955,7 +993,7 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 		if pk.Kind == "衔接" {
 			notes = append(notes, fmt.Sprintf("参考图%d是上一个镜头的最后一帧，人物位置、光线和环境要与它连贯", len(refs)))
 		} else {
-			notes = append(notes, fmt.Sprintf("参考图%d是%s「%s」的%s", len(refs), pk.Kind, pk.Name, pk.Note))
+			notes = append(notes, refNote(len(refs), pk.Kind, pk.Name, pk.Note, true))
 		}
 	}
 	kinds := map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}
@@ -970,7 +1008,15 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 	parts = append(parts, body)
 	for _, c := range s.Assets {
 		a := byCode[c]
-		if a == nil || used[c] || a.Description == "" {
+		if a == nil {
+			continue
+		}
+		// 角色：不管有没有参考图，都把固定造型（发型、服装）写明
+		if l := lookLine(p, a); l != "" {
+			parts = append(parts, l)
+			continue
+		}
+		if used[c] || a.Description == "" {
 			continue
 		}
 		parts = append(parts, fmt.Sprintf("%s「%s」：%s", kinds[a.Kind], a.Name, a.Description))
