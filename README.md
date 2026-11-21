@@ -148,10 +148,18 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `save_script` | 写剧本：结构化分场（画面 / 台词含说话人与语气 / 旁白）+ 卡点，或整份 Markdown |
 | `save_shots` | 写（整体替换）分镜：时长、景别运镜、画面、台词、资产引用、衔接（cut / continuous / first_last）、关键帧与视频提示词 |
 | `save_episode_summary` | 写本集摘要与卡点 |
-| `upsert_asset` | 新建或更新角色 / 场景 / 道具；角色的固定造型（发型、五官、服装、配饰）会写进每张关键帧提示词 |
+| `upsert_asset` | 新建或更新角色 / 场景 / 道具；角色的固定造型（发型、五官、服装、配饰）会写进每张关键帧提示词，所以 `look` 只写静态外貌和固定服装；常带道具 / 习惯动作写 `props_note`（不注入提示词），写了手持物 / 姿势会在 `warnings` 提醒 |
+| `update_shot` | 改单个镜头（`keyframe_prompt`、`video_prompt`、`camera`、`picture`、`dialogue`、`assets`、`duration`、`transition`、`ref_ids`，只改给出的字段），保留已有关键帧 / 视频候选 |
+| `create_project` | 新建作品（同时建第 1 集）：标题、画风、作品类型、画幅、单集时长、默认生图渠道 / 模型、声音模式（native / dub）等 |
+| `update_project` | 改作品设置（字段同上，只改给出的） |
+| `delete_asset` | 删除资产及其图片，并从镜头资产列表里去掉；必须 `confirm=true`（不传只预览） |
+| `detach_image` | 从资产里拿掉并删除一张图（`asset_id`、`image_id`）；必须 `confirm=true` |
 | `view_asset_images` | 资产设定图 / 三视图 / 表情表，MCP 图片内容块（默认长边 ≤ 1536 的 JPEG，可要原图） |
 | `view_shot` | 镜头信息 + 关键帧 + 选定视频首尾帧（图片内容块） |
+| `view_image` | 按图片编号看任意图（画室、资产、关键帧、封面），`image_id` 或 `image_ids`（≤ 8），图片内容块 |
 | `listen_dub` | 台词配音，MCP 音频内容块 |
+| `listen_voice` | 听音色：`sample(s)`（design_voice 候选）、`asset_id`（角色当前音色样本 + 原声参考）或 `project_id`（旁白），音频内容块 |
+| `clone_voice` | 用原声克隆角色音色：`source_shot_id`（镜头选定视频，可配 `video_id`）/ `audio_base64` / `audio_url`，可选 `start` / `end` 秒；Fish 渠道建私有音色，否则走 MiMo voiceclone；样本存进角色 `voice_refs`。视频原声里的配乐 / 环境声不会去除 |
 | `get_video_link` | 视频 / 成片的限时下载地址与建议文件名（MCP 没有视频内容类型，下载到本地看） |
 | `colab_status` | 运行时状态、排队数、已用 CU 估算、订阅 |
 | `colab_specs` | 可用运行时规格与每小时 CU |
@@ -171,7 +179,10 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `autopilot_cancel` | 停止一键成集 |
 | `generate_dub` | 生成一集的全部配音 |
 | `tts` | 用角色音色（`asset_id`）或指定音色合成一句话 |
-| `image_generate` | 用生图渠道出图 |
+| `design_voice` | 按描述设计音色候选，返回样本名、试听地址和音频内容块 |
+| `set_voice` | 把候选设为角色 / 旁白音色（可选 `synth_channel_id` 指定配音渠道） |
+| `image_generate` | 用生图渠道出图（放进画室，用 `view_image` 看） |
+| `generate_keyframe` | 给镜头出关键帧；`extra_prompt`（只这一次的追加要求）、`ref_tags`（如 `["main"]` = 只用设定图锁脸，不带三视图、不注入固定造型） |
 
 ### REST
 

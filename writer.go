@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -806,6 +807,7 @@ type assetArgs struct {
 	VoiceDescription string  `json:"voice_description"`
 	VoiceSampleText  string  `json:"voice_sample_text"`
 	BaseCode         *string `json:"base_code"`
+	PropsNote        *string `json:"props_note"`
 }
 
 // lookDescription 固定造型字段 → 外观描述。每句都带 consistency.go 认得的外貌词（发/眉/身形/穿/戴），
@@ -956,12 +958,20 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 	}
+	if a.PropsNote != nil {
+		_, _ = db.Exec(`UPDATE assets SET props_note=? WHERE id=?`, strings.TrimSpace(*a.PropsNote), cur.ID)
+	}
+	if kind == "character" {
+		if hits := dynamicLookWords(lookDescription(a.Look) + "。" + strings.TrimSpace(a.Description)); len(hits) > 0 {
+			warn = append(warn, fmt.Sprintf("外观里像是写了手持物 / 动作姿势（%s）：look 和 description 会原样写进每张关键帧，这些会出现在每个镜头里。只写静态外貌和固定服装；道具、姿势写进具体镜头的 keyframe_prompt，或记在 props_note（不注入提示词）", strings.Join(hits, "、")))
+		}
+	}
 	cur, _ = getAsset(cur.ID)
 	if !created && cur.PickedImageID > 0 && strings.TrimSpace(a.Description+lookDescription(a.Look)) != "" {
 		warn = append(warn, "外观已更新，已有的设定图不会自动重画；需要的话在应用的「资产」里重新生成")
 	}
 	out := map[string]any{"ok": true, "created": created, "asset_id": cur.ID, "code": cur.Code, "kind": cur.Kind, "name": cur.Name,
-		"description": cur.Description, "fixed_look": charLook(p, cur), "has_image": cur.PickedImageID > 0, "warnings": nonNil(warn)}
+		"description": cur.Description, "fixed_look": charLook(p, cur), "props_note": cur.PropsNote, "has_image": cur.PickedImageID > 0, "warnings": nonNil(warn)}
 	if cur.BaseID > 0 {
 		if b, err := getAsset(cur.BaseID); err == nil {
 			out["same_person_as"] = b.Code + " " + b.Name
@@ -972,6 +982,21 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 
 func charLookOf(name, desc string) string {
 	return strings.Join(appearanceSentences(desc, name), "，")
+}
+
+// 固定造型里不该出现的动态内容：手持物、动作姿势
+var dynamicLookRe = regexp.MustCompile(`手持|手拿|手握|手里|手中|拿着|握着|举着|抱着|提着|捧着|拎着|攥着|扛着|背着[^包]|挥舞|挥着|叼着|坐在|坐着|站在|蹲着|跪着|躺着|靠着|倚着|奔跑|跑着|走着|回头|转身|抬头|低头|叉腰|抱臂|双手抱胸|姿势|动作|pose|holding`)
+
+func dynamicLookWords(s string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range dynamicLookRe.FindAllString(s, -1) {
+		if !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // ---------- 读：写作上下文 ----------
@@ -987,6 +1012,9 @@ func assetBrief(p *Project, a *Asset) map[string]any {
 	if a.Kind == "character" {
 		m["fixed_look"] = charLook(p, a)
 		m["has_voice"] = !a.Voice.empty()
+	}
+	if a.PropsNote != "" {
+		m["props_note"] = a.PropsNote
 	}
 	return m
 }
@@ -1615,17 +1643,18 @@ var writerTools = []mcpTool{
 	{"save_episode_summary", "写入本集摘要（80–150 字，按时间顺序写清发生了什么、关系和处境变化、新人物与线索）和卡点，供后面各集参考。", obj(map[string]any{
 		"episode_id": num("集编号"), "summary": str("前情摘要"), "cliffhanger": str("结尾悬念，一句话"),
 	}, "episode_id", "summary")},
-	{"upsert_asset", "新建或更新资产（角色 / 场景 / 道具，跨集共享）。按 asset_id、code，或同作品同类型同名匹配已有资产。角色请用 look 写固定造型（发型、五官、体型、服装、配饰），这些会原样写进每张关键帧和封面的提示词，保证人物前后一致。voice_description 可选，用来设计角色音色。", obj(map[string]any{
+	{"upsert_asset", "新建或更新资产（角色 / 场景 / 道具，跨集共享）。按 asset_id、code，或同作品同类型同名匹配已有资产。角色请用 look 写固定造型（发型、五官、体型、服装、配饰），这些会原样写进每张关键帧和封面的提示词，保证人物前后一致。look / description 只写静态外貌和固定服装：手持物、动作姿势、临时道具不要写进去（否则每个镜头都会画出来），写进具体镜头的 keyframe_prompt，或记在 props_note（只给编剧备忘，不注入提示词）。写了这类词会在 warnings 里提醒。voice_description 可选，用来设计角色音色。", obj(map[string]any{
 		"project_id": num("作品编号"), "asset_id": num("已有资产编号（更新时）"), "code": str("已有资产编号，如 C01（更新时）"),
 		"kind": map[string]any{"type": "string", "enum": []string{"character", "scene", "prop"}}, "name": str("名称"),
 		"description": str("外观描述（场景：空间、时代、光线、主色调；道具：外形材质）"),
 		"look": obj(map[string]any{
 			"age": str("年龄感"), "gender": str("性别"), "hair": str("发型发色"), "face": str("眉眼五官、标志特征"), "body": str("体型身形"),
-			"outfit": str("服装与配色（固定不变的那套）"), "accessories": str("配饰"), "palette": str("主色调"),
+			"outfit": str("服装与配色（固定不变的那套）"), "accessories": str("佩戴在身上的配饰（耳钉、项链、眼镜）；不要写手里拿的东西"), "palette": str("主色调"),
 		}),
 		"prompt":            str("生图提示词（可选，单独描述这个资产本身）"),
 		"voice_description": str("音色描述（可选，角色）：年龄感、音色质感、语速、口音"),
 		"voice_sample_text": str("试音台词（可选）"),
+		"props_note":        str("常带道具 / 习惯动作备注（可选，如「常拎一把黑伞，紧张时摸耳钉」）：只记在资产上给编剧参考，不会注入出图提示词；填空字符串清掉"),
 		"base_code":         str("同一个人的另一个时期 / 另一套造型时，填本体角色的编号（如 C01）：出图时拿本体的图锁脸，发型服装按这个角色自己的 look。名字写成「阿策（千禧年）」且已有「阿策」时会自动挂上；填空字符串取消"),
 	}, "project_id")},
 	{"view_asset_images", "看资产的图片：选用的设定图、三视图、表情表、参考照，以及（which 含 candidates 时）没选用的候选图，每张都标出图片编号；文字里列出全部图片编号和哪张是选用（可用作 image_generate 的参考图）。返回图片内容块（默认缩到长边 1536 像素的 JPEG；original=true 返回原图）。", obj(map[string]any{

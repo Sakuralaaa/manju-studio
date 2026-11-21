@@ -405,7 +405,7 @@ func toolImageGenerate(ctx context.Context, a imageArgs, base string) (any, erro
 		out = append(out, map[string]any{"image_id": im.ID, "width": im.Width, "height": im.Height, "model": im.Model,
 			"channel_id": im.ChannelID, "url": fmt.Sprintf("%s/v1/images/%d/file", base, im.ID)})
 	}
-	return map[string]any{"images": out, "note": "图片已放进应用的「画室」，用户可以在界面里查看、下载；要放进作品，用 attach_image 存到资产（设定图 / 三视图 / 表情表 / 参考图）。"}, nil
+	return map[string]any{"images": out, "note": "图片已放进应用的「画室」，用户可以在界面里查看、下载；你要亲眼看效果，用 view_image（image_ids 传上面的编号）拿图片内容块。要放进作品，用 attach_image 存到资产（设定图 / 三视图 / 表情表 / 参考图）。"}, nil
 }
 
 // toolImageChannels 生图渠道和各自的模型、参考图上限
@@ -559,11 +559,13 @@ func waitImages(ctx context.Context, tid int64, ownerType string, ownerID int64,
 }
 
 type keyframeArgs struct {
-	ShotID    int64   `json:"shot_id"`
-	N         int     `json:"n"`
-	ChannelID int64   `json:"channel_id"`
-	Model     string  `json:"model"`
-	RefIDs    []int64 `json:"ref_image_ids"`
+	ShotID    int64    `json:"shot_id"`
+	N         int      `json:"n"`
+	ChannelID int64    `json:"channel_id"`
+	Model     string   `json:"model"`
+	RefIDs    []int64  `json:"ref_image_ids"`
+	Extra     string   `json:"extra_prompt"`
+	RefTags   []string `json:"ref_tags"`
 }
 
 func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error) {
@@ -585,7 +587,12 @@ func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error)
 	for _, im := range listImages(`WHERE owner_type='shot' AND owner_id=?`, s.ID) {
 		before[im.ID] = true
 	}
-	tid, err := genKeyframeTask(p, s, clampInt(a.N, 1, 4), imgOverride{ChannelID: a.ChannelID, Model: a.Model})
+	for _, t := range a.RefTags {
+		if t != "main" && t != "sheet" && t != "expr" {
+			return nil, errors.New("ref_tags 只能包含 main（设定图）/ sheet（三视图）/ expr（表情表）")
+		}
+	}
+	tid, err := genKeyframeTask(p, s, clampInt(a.N, 1, 4), imgOverride{ChannelID: a.ChannelID, Model: a.Model, Extra: a.Extra, RefTags: a.RefTags})
 	if err != nil {
 		return nil, err
 	}
@@ -831,7 +838,7 @@ var mcpTools = []mcpTool{
 	{"tts", "用角色音色（asset_id）或指定音色合成一句话，返回音频地址。", obj(map[string]any{
 		"text": str("要念的文字"), "emotion": str("语气，如：压低声音、愤怒"), "asset_id": num("角色资产编号"), "voice": map[string]any{"type": "object", "description": "音色：channel_id、mode（fish / builtin / design / clone / openai）、voice、sample、speed、pitch"},
 	}, "text")},
-	{"design_voice", "按文字描述设计角色音色（或旁白音色）：返回 1–4 个候选试听地址和样本名，不会改角色的音色。听完用 set_voice 选定。description 不填就用角色已存的音色描述（upsert_asset 的 voice_description）。有小米 MiMo 渠道用 MiMo，否则用 Fish Audio。", obj(map[string]any{
+	{"design_voice", "按文字描述设计角色音色（或旁白音色）：返回 1–4 个候选（样本名 + 试听地址 + MCP 音频内容块，可以直接听），不会改角色的音色。之后也可以用 listen_voice 再听。听完用 set_voice 选定。description 不填就用角色已存的音色描述（upsert_asset 的 voice_description）。有小米 MiMo 渠道用 MiMo，否则用 Fish Audio。", obj(map[string]any{
 		"asset_id": num("角色资产编号（给旁白设计时不填，填 project_id）"), "project_id": num("作品编号（旁白）"), "description": str("音色描述：性别、年龄感、音色质感、语速、性格、口音"),
 		"sample_text": str("试音台词（150 字以内）"), "n": num("候选个数 1–4，默认 3"), "channel_id": num("语音渠道编号（可选）"),
 	})},
@@ -840,7 +847,7 @@ var mcpTools = []mcpTool{
 		"description": str("这段音色的描述（记下来以后改用）"), "synth_channel_id": num("配音用哪个渠道（可选）：设计用 MiMo、配音交给 Fish 时填 Fish 渠道编号；只填这个不填 sample = 把已选音色换到这个渠道配音"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
 	})},
 	{"list_image_channels", "列出生图渠道：渠道编号、可用模型、参考图上限。指定渠道和模型出图前先看这个。", obj(map[string]any{})},
-	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。", obj(map[string]any{
+	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载；返回图片编号，用 view_image 看图。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。", obj(map[string]any{
 		"prompt": str("提示词。带参考图时写清每张参考图是谁、参考什么，如「参考图1是同一个人，脸型五官保持一致，只改发型和服装」"), "channel_id": num("渠道编号（list_image_channels），不填用第一个生图渠道"), "model": str("模型名，不填用渠道的第一个模型"),
 		"aspect": str("比例，如 9:16、3:4、1:1、16:9"), "n": num("张数 1–4"),
 		"ref_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "参考图：应用里已有图片的编号（资产图、画室图都行，view_asset_images 能看到编号）"},
@@ -856,9 +863,11 @@ var mcpTools = []mcpTool{
 		"extra_prompt":   str("这一次额外的要求，如「年龄 30 岁左右，炭灰高领毛衣配黑大衣」"),
 		"wait":           boolp("等出完再返回，默认 true"),
 	})},
-	{"generate_keyframe", "给一个镜头生成关键帧：自动按镜头里的资产带上角色 / 场景参考图。可指定渠道和模型。默认等出完再返回。", obj(map[string]any{
+	{"generate_keyframe", "给一个镜头生成关键帧：自动按镜头里的资产带上角色 / 场景参考图。可指定渠道和模型；extra_prompt / ref_tags 只影响这一次。默认等出完再返回，已有的关键帧候选都保留。", obj(map[string]any{
 		"shot_id": num("镜头编号"), "n": num("张数 1–4，默认 1"), "channel_id": num("渠道编号，不填用作品设置"), "model": str("模型名"),
 		"ref_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "这个镜头额外的参考图编号（构图、姿势、氛围、道具），最多 4 张，会保存在镜头上；传空数组清掉。人物的脸仍按角色资产自动带"},
+		"extra_prompt":  str("只对这一次出图追加的要求（不保存到镜头），如「她左手拿着一把黑伞，抬头看雨」。要长期改提示词用 update_shot"),
+		"ref_tags":      map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"main", "sheet", "expr"}}, "description": "只对这一次：角色带哪几类图（按顺序取第一张有的）。不填 = 默认（三视图优先 + 固定造型）。[\"main\"] = 只用设定图锁脸，不带三视图、不注入固定造型，适合换装 / 特殊姿势的镜头"},
 	}, "shot_id")},
 	{"pick_image", "把一张图设为选用（定稿）：资产的设定图 / 三视图 / 表情表、镜头的关键帧、封面。后续出图和关键帧都用选用的那张。候选图编号用 view_asset_images / view_shot 看。", obj(map[string]any{
 		"image_id": num("图片编号"),
@@ -975,7 +984,7 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 	case "ping":
 		return ok(map[string]any{})
 	case "tools/list":
-		return ok(map[string]any{"tools": append(append([]mcpTool{}, writerTools...), mcpTools...)})
+		return ok(map[string]any{"tools": append(append(append([]mcpTool{}, writerTools...), moreTools...), mcpTools...)})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -988,6 +997,9 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 			p.Arguments = []byte("{}")
 		}
 		v, err := callWriterTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
+		if errors.Is(err, errUnknownTool) {
+			v, err = callMoreTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
+		}
 		if errors.Is(err, errUnknownTool) {
 			v, err = callTool(ctx, p.Name, p.Arguments, base)
 		}

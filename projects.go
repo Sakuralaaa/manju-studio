@@ -16,32 +16,38 @@ import (
 // ---------- 资产（跨集共享） ----------
 
 type Asset struct {
-	ID            int64     `json:"id"`
-	ProjectID     int64     `json:"project_id"`
-	Kind          string    `json:"kind"`
-	Code          string    `json:"code"`
-	Name          string    `json:"name"`
-	Description   string    `json:"description"`
-	Prompt        string    `json:"prompt"`
-	PickedImageID int64     `json:"picked_image_id"`
-	SheetImageID  int64     `json:"sheet_image_id"`
-	ExprImageID   int64     `json:"expr_image_id"`
-	Voice         VoiceSpec `json:"voice"`
-	BaseID        int64     `json:"base_id"` // 同一个人的另一个时期：生图时拿本体的图锁脸
-	Sort          int       `json:"sort"`
-	Images        []*Image  `json:"images"`
-	Appear        int       `json:"appear"`
+	ID            int64      `json:"id"`
+	ProjectID     int64      `json:"project_id"`
+	Kind          string     `json:"kind"`
+	Code          string     `json:"code"`
+	Name          string     `json:"name"`
+	Description   string     `json:"description"`
+	Prompt        string     `json:"prompt"`
+	PickedImageID int64      `json:"picked_image_id"`
+	SheetImageID  int64      `json:"sheet_image_id"`
+	ExprImageID   int64      `json:"expr_image_id"`
+	Voice         VoiceSpec  `json:"voice"`
+	BaseID        int64      `json:"base_id"`    // 同一个人的另一个时期：生图时拿本体的图锁脸
+	PropsNote     string     `json:"props_note"` // 常带道具 / 习惯动作的备注：只给编剧看，不注入出图提示词
+	VoiceRefs     []VoiceRef `json:"voice_refs"` // 克隆用的原声样本（clone_voice），以后也可做声音转换的参考
+	Sort          int        `json:"sort"`
+	Images        []*Image   `json:"images"`
+	Appear        int        `json:"appear"`
 }
 
-const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id`
+const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id,props_note,voice_refs`
 
 func scanAsset(sc interface{ Scan(...any) error }) (*Asset, error) {
 	var a Asset
-	var voice string
-	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID); err != nil {
+	var voice, vrefs string
+	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID, &a.PropsNote, &vrefs); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(voice), &a.Voice)
+	_ = json.Unmarshal([]byte(vrefs), &a.VoiceRefs)
+	if a.VoiceRefs == nil {
+		a.VoiceRefs = []VoiceRef{}
+	}
 	a.Images = []*Image{}
 	return &a, nil
 }
@@ -773,10 +779,59 @@ func assetPromptWith(p *Project, a *Asset, tag string, refs []assetRef) string {
 
 // imgOverride 单次出图指定渠道和模型（界面下拉 / 智能体参数）
 type imgOverride struct {
-	ChannelID int64   `json:"channel_id"`
-	Model     string  `json:"model"`
-	FaceIDs   []int64 `json:"face_image_ids"` // 资产出图：只用这几张锁脸，不再自动带别的参考图
-	Extra     string  `json:"extra_prompt"`   // 资产出图：这一次追加的要求
+	ChannelID int64    `json:"channel_id"`
+	Model     string   `json:"model"`
+	FaceIDs   []int64  `json:"face_image_ids"` // 资产出图：只用这几张锁脸，不再自动带别的参考图
+	Extra     string   `json:"extra_prompt"`   // 资产出图 / 关键帧：这一次追加的要求（不保存）
+	RefTags   []string `json:"ref_tags"`       // 关键帧：角色只带哪几类图（main / sheet / expr），不含 sheet 时只锁脸、不注入固定造型
+}
+
+// kfOpts 单次关键帧的参考图与提示词选项（不保存到镜头）
+type kfOpts struct {
+	RefTags []string
+	Extra   string
+}
+
+func (o kfOpts) tags() []string {
+	var out []string
+	for _, t := range o.RefTags {
+		t = strings.TrimSpace(t)
+		if t == "main" || t == "sheet" || t == "expr" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// faceOnly 指定了 ref_tags 且不含三视图：角色参考图只用来锁脸，不注入固定造型
+func (o kfOpts) faceOnly() bool {
+	t := o.tags()
+	return len(t) > 0 && !contains(t, "sheet")
+}
+
+// charImageFor 按 ref_tags 的顺序取角色的第一张可用图；tags 为空时同 charRefImage
+func charImageFor(a *Asset, tags []string) (int64, string) {
+	if len(tags) == 0 || a == nil || a.Kind != "character" {
+		return charRefImage(a)
+	}
+	for _, t := range tags {
+		switch {
+		case t == "main" && a.PickedImageID > 0:
+			return a.PickedImageID, "设定图"
+		case t == "sheet" && a.SheetImageID > 0:
+			return a.SheetImageID, "定妆三视图"
+		case t == "expr" && a.ExprImageID > 0:
+			return a.ExprImageID, "表情表"
+		}
+	}
+	return 0, ""
+}
+
+func firstKf(o []kfOpts) kfOpts {
+	if len(o) > 0 {
+		return o[0]
+	}
+	return kfOpts{}
 }
 
 func applyOverride(ch *Channel, model string, o imgOverride) (*Channel, string, error) {
@@ -1167,7 +1222,8 @@ type refPick struct {
 
 // planRefs 按相关度排序参考图：本镜头里最重要的角色（台词多、全剧出场多）优先用定妆三视图，
 // 然后其余角色、场景、道具；上一镜头的最后一帧（衔接时）排在主角之后。超出渠道上限的改用文字描述。
-func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
+func planRefs(p *Project, s *Shot, limit int, opts ...kfOpts) ([]refPick, []*Image) {
+	tags := firstKf(opts).tags()
 	assets := listAssets(p.ID)
 	byCode := map[string]*Asset{}
 	for _, a := range assets {
@@ -1180,7 +1236,7 @@ func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 	var chars, others []cand
 	for i, c := range s.Assets {
 		a := byCode[c]
-		if id, _ := charRefImage(a); id == 0 {
+		if id, _ := charImageFor(a, tags); id == 0 {
 			continue
 		}
 		sc := float64(a.Appear) - float64(i)*0.01
@@ -1225,7 +1281,7 @@ func planRefs(p *Project, s *Shot, limit int) ([]refPick, []*Image) {
 	}
 	for i, c := range chars {
 		// 主角、以及参考图位置够用时每个角色都用定妆三视图；否则用设定图（单人全身，占画面更少）
-		img, note := charRefImage(c.a)
+		img, note := charImageFor(c.a, tags)
 		if c.a.PickedImageID > 0 && note == "定妆三视图" && !(i == 0 || limit >= len(chars)+len(others)+1) {
 			img, note = c.a.PickedImageID, "设定图"
 		}
@@ -1262,13 +1318,15 @@ func refLimit(ch *Channel) int {
 }
 
 // keyframePlan 按渠道参考图上限挑选参考图，并在提示词里说明每张参考图是谁
-func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPick) {
+func keyframePlan(p *Project, s *Shot, ch *Channel, opts ...kfOpts) (string, []refFile, []refPick) {
+	opt := firstKf(opts)
+	faceOnly := opt.faceOnly()
 	assets := listAssets(p.ID)
 	byCode := map[string]*Asset{}
 	for _, a := range assets {
 		byCode[a.Code] = a
 	}
-	picks, ims := planRefs(p, s, refLimit(ch))
+	picks, ims := planRefs(p, s, refLimit(ch), opt)
 	var refs []refFile
 	var notes []string
 	used := map[string]bool{}
@@ -1288,6 +1346,8 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 			notes = append(notes, fmt.Sprintf("参考图%d是上一个镜头的最后一帧，人物位置、光线和环境要与它连贯", len(refs)))
 		} else if pk.Kind == "手动" {
 			notes = append(notes, fmt.Sprintf("参考图%d是这个镜头指定的参考图，构图、姿势、氛围或道具按它来画，人物的脸仍以角色参考图为准", len(refs)))
+		} else if faceOnly && pk.Kind == "角色" {
+			notes = append(notes, fmt.Sprintf("参考图%d是角色「%s」的%s，只用来锁定脸型五官，发型服装、姿势和手里的东西按本镜头描述来画", len(refs), pk.Name, pk.Note))
 		} else {
 			notes = append(notes, refNote(len(refs), pk.Kind, pk.Name, pk.Note, true))
 		}
@@ -1307,7 +1367,10 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 		if a == nil {
 			continue
 		}
-		// 角色：不管有没有参考图，都把固定造型（发型、服装）写明
+		// 角色：不管有没有参考图，都把固定造型（发型、服装）写明；ref_tags 只锁脸时不写
+		if faceOnly && a.Kind == "character" {
+			continue
+		}
 		if l := lookLine(p, a); l != "" {
 			parts = append(parts, l)
 			continue
@@ -1319,10 +1382,15 @@ func keyframePlan(p *Project, s *Shot, ch *Channel) (string, []refFile, []refPic
 	}
 	if len(notes) > 0 {
 		tail := "；保持角色的脸、发型和服装与参考图一致，场景沿用参考图的空间与色调"
-		if len(s.RefImages) > 0 {
+		if faceOnly {
+			tail = "；人物的脸以角色参考图为准，发型服装、姿势和道具按本镜头描述，场景沿用参考图的空间与色调"
+		} else if len(s.RefImages) > 0 {
 			tail = "；角色的脸、发型和服装以角色参考图为准，不要被指定参考图里的人物外貌带偏"
 		}
 		parts = append(parts, strings.Join(notes, "，")+tail)
+	}
+	if ex := strings.TrimSpace(opt.Extra); ex != "" {
+		parts = append(parts, "这一张额外要求："+strings.TrimRight(ex, "。"))
 	}
 	if isRealistic(p) {
 		parts = append(parts, realTail)
@@ -1344,7 +1412,11 @@ func genKeyframeTask(p *Project, s *Shot, n int, ov ...imgOverride) (int64, erro
 	if s.Chain == "ref" {
 		_, _ = ensurePrevLastFrame(s)
 	}
-	prompt, refs, _ := keyframePlan(p, s, ch)
+	var kf kfOpts
+	if len(ov) > 0 {
+		kf = kfOpts{RefTags: ov[0].RefTags, Extra: ov[0].Extra}
+	}
+	prompt, refs, _ := keyframePlan(p, s, ch, kf)
 	params := paramsFor(ch, p.Aspect, n)
 	return startTask(p.ID, s.EpisodeID, "image", "shot", s.ID, func(ctx context.Context) error {
 		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
