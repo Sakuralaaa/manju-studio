@@ -21,7 +21,7 @@ import (
 var webFS embed.FS
 
 var (
-	version   = "0.2.10"
+	version   = "0.2.11"
 	dataDir   string
 	adminPass string
 	secret    []byte
@@ -143,6 +143,14 @@ func routes(m *http.ServeMux) {
 	a("DELETE /api/images/{id}", handleImageDelete)
 	a("POST /api/videos/{id}/pick", handleVideoPick)
 	a("POST /api/videos/{id}/cancel", handleVideoCancel)
+	// 生成后统一音色（0.2.11）
+	a("POST /api/videos/{id}/voice-convert", handleVideoVoiceConvert)
+	a("POST /api/videos/{id}/version", handleVideoVersion)
+	a("PUT /api/shots/{id}/voice-unify", handleShotVoiceUnify)
+	a("GET /api/assets/{id}/vc-master", handleAssetVCMasterGet)
+	a("PUT /api/assets/{id}/vc-master", handleAssetVCMasterPut)
+	a("GET /api/voice-conv/settings", handleVCSettingsGet)
+	a("PUT /api/voice-conv/settings", handleVCSettingsPut)
 	a("GET /api/tasks/{id}", handleTaskGet)
 	a("PUT /api/lines/{id}", handleLineUpdate)
 	a("POST /api/lines/{id}/generate", handleLineGenerate)
@@ -206,6 +214,11 @@ func routes(m *http.ServeMux) {
 	k("POST /v1/videos", extVideoSubmit)
 	k("GET /v1/videos/{id}", extVideoGet)
 	k("GET /v1/videos/{id}/file", extVideoFile)
+	k("POST /v1/videos/{id}/voice-convert", handleVideoVoiceConvert)
+	k("POST /v1/videos/{id}/version", handleVideoVersion)
+	k("PUT /v1/shots/{id}/voice-unify", handleShotVoiceUnify)
+	k("GET /v1/assets/{id}/vc-master", handleAssetVCMasterGet)
+	k("PUT /v1/assets/{id}/vc-master", handleAssetVCMasterPut)
 	k("GET /v1/projects", extProjects)
 	k("GET /v1/projects/{id}/shots", extShots)
 	k("POST /v1/images", extImageGenerate)

@@ -42,21 +42,22 @@ type Project struct {
 	Deliver        string    `json:"deliver"`
 	PostUpscale    bool      `json:"post_upscale"`
 	PostInterp     bool      `json:"post_interp"`
+	VoiceUnify     bool      `json:"voice_unify"` // 生成后统一音色（默认关）
 	CreatedAt      int64     `json:"created_at"`
 	UpdatedAt      int64     `json:"updated_at"`
 }
 
-const projCols = `id,title,idea,style,aspect,episode_sec,shot_target,text_channel_id,text_model,image_channel_id,image_model,video_sec,video_res,video_turbo,world,bios,outline,episodes_plan,audio_mode,orig_volume,takes,narrator_voice,voice_channel_id,deliver,post_upscale,post_interp,kind,created_at,updated_at`
+const projCols = `id,title,idea,style,aspect,episode_sec,shot_target,text_channel_id,text_model,image_channel_id,image_model,video_sec,video_res,video_turbo,world,bios,outline,episodes_plan,audio_mode,orig_volume,takes,narrator_voice,voice_channel_id,deliver,post_upscale,post_interp,kind,voice_unify,created_at,updated_at`
 
 func scanProject(sc interface{ Scan(...any) error }) (*Project, error) {
 	var p Project
-	var turbo, up, interp int
+	var turbo, up, interp, vu int
 	var nv string
 	if err := sc.Scan(&p.ID, &p.Title, &p.Idea, &p.Style, &p.Aspect, &p.EpisodeSec, &p.ShotTarget, &p.TextChannelID, &p.TextModel, &p.ImageChannelID, &p.ImageModel, &p.VideoSec, &p.VideoRes, &turbo,
-		&p.World, &p.Bios, &p.Outline, &p.EpisodesPlan, &p.AudioMode, &p.OrigVolume, &p.Takes, &nv, &p.VoiceChannelID, &p.Deliver, &up, &interp, &p.Kind, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.World, &p.Bios, &p.Outline, &p.EpisodesPlan, &p.AudioMode, &p.OrigVolume, &p.Takes, &nv, &p.VoiceChannelID, &p.Deliver, &up, &interp, &p.Kind, &vu, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
-	p.VideoTurbo, p.PostUpscale, p.PostInterp = turbo == 1, up == 1, interp == 1
+	p.VideoTurbo, p.PostUpscale, p.PostInterp, p.VoiceUnify = turbo == 1, up == 1, interp == 1, vu == 1
 	_ = json.Unmarshal([]byte(nv), &p.NarratorVoice)
 	if p.Takes < 1 {
 		p.Takes = 1
@@ -329,6 +330,7 @@ type projectIn struct {
 	Deliver        *string    `json:"deliver"`
 	PostUpscale    *bool      `json:"post_upscale"`
 	PostInterp     *bool      `json:"post_interp"`
+	VoiceUnify     *bool      `json:"voice_unify"`
 }
 
 func handleProjectCreate(w http.ResponseWriter, r *http.Request) {
@@ -448,6 +450,9 @@ func applyProject(id int64, in projectIn) error {
 	if in.PostInterp != nil {
 		set("post_interp", b2i(*in.PostInterp))
 	}
+	if in.VoiceUnify != nil {
+		set("voice_unify", b2i(*in.VoiceUnify))
+	}
 	touchProject(id)
 	return nil
 }
@@ -499,6 +504,9 @@ func handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	for _, v := range listVideos(`WHERE project_id=? AND status IN ('done','failed','canceled')`, id) {
 		if v.File != "" {
 			_ = os.Remove(filepath.Join(dataDir, "videos", v.File))
+		}
+		if v.VcFile != "" {
+			_ = os.Remove(filepath.Join(dataDir, "videos", v.VcFile))
 		}
 	}
 	_, _ = db.Exec(`UPDATE videos SET status='canceled' WHERE project_id=? AND status='queued'`, id)
@@ -679,6 +687,9 @@ func handleEpisodeDelete(w http.ResponseWriter, r *http.Request) {
 	for _, v := range listVideos(`WHERE episode_id=? AND status IN ('done','failed','canceled')`, e.ID) {
 		if v.File != "" {
 			_ = os.Remove(filepath.Join(dataDir, "videos", v.File))
+		}
+		if v.VcFile != "" {
+			_ = os.Remove(filepath.Join(dataDir, "videos", v.VcFile))
 		}
 	}
 	_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE episode_id=? AND status='queued'`, now(), e.ID)

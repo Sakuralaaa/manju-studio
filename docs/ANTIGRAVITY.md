@@ -101,6 +101,8 @@ description: 漫剧工坊外部编剧规则
 | `listen_dub` | 台词配音：`{"type":"audio","data":<base64>,"mimeType":"audio/mpeg"}`（MCP 2025-03-26 起支持音频块；客户端协商 2024-11-05 时改给音频地址），每次最多 8 段、合计 ≤ 10 MB |
 | `get_video_link` | 视频的限时下载地址（2 小时，不需要密钥）+ 建议文件名。**MCP 没有视频内容类型**，请让智能体用 `curl -fL -o <filename> "<url>"` 下载到工作区再看 |
 
+0.2.11 新增：生成后统一音色——`convert_take_voice`（把一条视频的人声转成说话角色的音色母带，原版保留）、`pick_take_version`（原版 / 转换版）、`set_voice_unify`（作品默认 / 镜头覆盖）、`set_voice_master`（看 / 指定母带）；`update_project` / `create_project` 新增 `voice_unify`；`get_video_link` 新增 `version`；`list_shots` / `get_episode` 的镜头带 `voice_unify`（是否开启、说话角色、母带、跳过原因）和 `take_voice`（每条视频的统一音色状态）。
+
 0.2.10 新增：音色库——`list_voice_library`、`save_voice_to_library`、`apply_library_voice`、`delete_library_voice`（需 `confirm=true`）；`listen_voice` 支持 `library_id`；`clone_voice` 新增 `save_to_library`。
 
 0.2.9 新增：`update_shot`（改单个镜头、保留已有关键帧 / 视频）、`view_image`（按编号看任意图）、`listen_voice`（听音色样本）、`clone_voice`（用镜头原声克隆音色）、`create_project` / `update_project`、`delete_asset` / `detach_image`（需 `confirm=true`）；`design_voice` 结果带音频内容块；`generate_keyframe` 新增 `extra_prompt`、`ref_tags`；`upsert_asset` 新增 `props_note`。

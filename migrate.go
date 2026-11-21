@@ -122,6 +122,17 @@ var addCols = []struct{ table, col, def string }{
 	{"tasks", "episode_id", "INTEGER NOT NULL DEFAULT 0"},
 	{"channels", "voices", "TEXT NOT NULL DEFAULT '[]'"},
 	{"sessions", "boot_sec", "REAL NOT NULL DEFAULT 0"},
+	// 0.2.11 生成后统一音色
+	{"projects", "voice_unify", "INTEGER NOT NULL DEFAULT 0"},
+	{"shots", "voice_unify", "TEXT NOT NULL DEFAULT ''"},
+	{"assets", "vc_master", "TEXT NOT NULL DEFAULT ''"},
+	{"videos", "vc_status", "TEXT NOT NULL DEFAULT ''"},
+	{"videos", "vc_file", "TEXT NOT NULL DEFAULT ''"},
+	{"videos", "vc_error", "TEXT NOT NULL DEFAULT ''"},
+	{"videos", "vc_asset_id", "INTEGER NOT NULL DEFAULT 0"},
+	{"videos", "vc_use", "INTEGER NOT NULL DEFAULT 0"},
+	{"videos", "vc_info", "TEXT NOT NULL DEFAULT '{}'"},
+	{"videos", "vc_at", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 func hasCol(table, col string) bool {

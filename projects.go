@@ -30,17 +30,18 @@ type Asset struct {
 	BaseID        int64      `json:"base_id"`    // 同一个人的另一个时期：生图时拿本体的图锁脸
 	PropsNote     string     `json:"props_note"` // 常带道具 / 习惯动作的备注：只给编剧看，不注入出图提示词
 	VoiceRefs     []VoiceRef `json:"voice_refs"` // 克隆用的原声样本（clone_voice），以后也可做声音转换的参考
+	VcMaster      string     `json:"vc_master"`  // 统一音色用的母带（样本名）；空 = 自动（最长的原声参考，否则音色样本）
 	Sort          int        `json:"sort"`
 	Images        []*Image   `json:"images"`
 	Appear        int        `json:"appear"`
 }
 
-const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id,props_note,voice_refs`
+const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id,props_note,voice_refs,vc_master`
 
 func scanAsset(sc interface{ Scan(...any) error }) (*Asset, error) {
 	var a Asset
 	var voice, vrefs string
-	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID, &a.PropsNote, &vrefs); err != nil {
+	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID, &a.PropsNote, &vrefs, &a.VcMaster); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(voice), &a.Voice)
@@ -120,16 +121,17 @@ type Shot struct {
 	SfxURL         string   `json:"sfx_url"`
 	SfxName        string   `json:"sfx_name"`
 	SfxVolume      float64  `json:"sfx_volume"`
+	VoiceUnify     string   `json:"voice_unify"` // 生成后统一音色：空 = 跟随作品；on / off = 本镜头单独开 / 关
 	Images         []*Image `json:"images"`
 	Videos         []*Video `json:"videos"`
 }
 
-const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume,ref_ids`
+const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume,ref_ids,voice_unify`
 
 func scanShot(sc interface{ Scan(...any) error }) (*Shot, error) {
 	var s Shot
 	var codes, refs string
-	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume, &refs); err != nil {
+	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume, &refs, &s.VoiceUnify); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(refs), &s.refIDs)

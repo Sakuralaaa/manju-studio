@@ -322,8 +322,9 @@
 @media (max-width: 720px) {
   .topbar { padding: 0 8px 0 12px; gap: 8px; grid-template-columns: auto 1fr auto; }
   .brand b { display: none; }
-  .nav { justify-self: center; }
-  .nav-item { padding: 0 12px; }
+  .nav { justify-self: center; min-width: 0; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav-item { padding: 0 12px; flex: none; }
   .hide-xs { display: none !important; }
   .page { padding: 24px 16px 48px; }
   .page-head { flex-wrap: wrap; }
@@ -686,3 +687,15 @@
 .librefs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 .libref { display: inline-flex; align-items: center; gap: 2px; color: var(--text-2); }
 @media (max-width: 640px) { .libgrid { grid-template-columns: minmax(0, 1fr); } }
+
+/* 生成后统一音色（0.2.11） */
+.btn.is-on { border-color: var(--accent-text); color: var(--accent-text); background: var(--accent-soft); }
+.icon-btn.is-on { color: var(--accent-text); }
+.vcrow { display: flex; align-items: center; gap: 6px; min-height: 28px; min-width: 0; }
+.vcrow > span:not(.grow) { overflow: hidden; min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 18px; }
+.vu-select { width: 100%; }
+.vcm-row { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); cursor: pointer; font-size: 14px; }
+.vcm-row.is-on { border-color: var(--accent-text); background: var(--accent-soft); }
+.vcm-row input { accent-color: var(--accent-text); }
+.vcfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+@media (max-width: 420px) { .nav-item { padding: 0 9px; font-size: 13px; } }

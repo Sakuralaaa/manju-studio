@@ -106,3 +106,23 @@
 - **SageAttention**：G4（Python 3.12、torch 2.11.0+cu128、sm_120）优先装 soren-labs 预编译的 2.2.0 轮子并校验 sha256，其他情况装 PyPI 版本。
 - **为什么不换 BF16**：soren-labs 方案本身用的也是 int8 主模型；BF16 精简版 40.2 GB，是 int8 的两倍，下载和云端缓存都翻倍，画质差异很小（int8 量化误差约 0.9%，第三方实测）。按成本优先，保持 int8。
 - 未在 GPU 上实测：TE-Speed 与新版 ComfyUI 的实际提速、预编译 Sage 轮子与当前 Colab torch 版本是否匹配。
+
+## 生成后统一音色（0.2.11，`colab/vc.py`）
+
+在视频运行时（和 ComfyUI 同一台机器）上执行，脚本可重复执行：
+
+1. **安装（后台、只装一次）**：调度循环发现有要统一音色的视频在排队 / 生成时，先执行 `mode=setup_bg`，用 `nohup` 起一个安装脚本，不占用视频渲染：
+   `git clone --depth 1 https://github.com/Plachtaa/seed-vc /content/seed-vc` →
+   依赖（accelerate、librosa、huggingface-hub≥0.28.1、munch、einops、descript-audio-codec、pydub、resemblyzer、transformers==4.46.3、soundfile、hydra-core、pyyaml、python-dotenv、demucs）用 `pip install --target /content/vclib`，
+   `--only-binary=scipy,numpy` 并用 `-c` 锁成机器上已有的 scipy / numpy / torch / torchaudio 版本（scipy 从源码编译会失败）→
+   删掉 vclib 里的 torch* / torchaudio* / numpy* / nvidia* / triton* / **旧的 `typing` 补丁包**（`typing.py`、`typing-*`）/ dataclasses / enum34 / bin / functorch（会顶掉系统里的新版本）→
+   给 `seed-vc/modules/bigvgan/bigvgan.py` 的 `_from_pretrained` 补默认值 `proxies: Optional[Dict] = None`、`resume_download: bool = False`（新版 huggingface_hub 不再传这两个参数）。
+   完成标记 `/content/vclib/.mj_ok`，失败标记 `/content/mj_vc_setup.fail`（日志 `/content/mj_vc_setup.log`）。
+2. **每条视频**（`mode=run`）：上传原版视频和母带到 `/content/mj_vc/in/` → 等安装完成 → ffmpeg 抽音轨（44.1k 立体声）→ `python -m demucs --two-stems vocals -n htdemucs` 分出 vocals / no_vocals →
+   母带（按内容缓存）：可选先 demucs 去配乐 → 去首尾静音 + loudnorm → 单声道 44.1k、最长 25 秒 →
+   `inference.py --source vocals --target 母带 --diffusion-steps 30 --length-adjust 1.0 --inference-cfg-rate 0.7 --f0-condition False --fp16 True`（f0 开时加 `--auto-f0-adjust`、`--semi-tone-shift`）→
+   混音 `[1:a]aresample=44100,pan=stereo|c0=c0|c1=c0[a1];[2:a][a1]amix=inputs=2:duration=first:normalize=0`，视频流直接复制 → 应用下载为 `v<id>-vc-*.mp4`。
+   显存不够（CUDA OOM）时调用 ComfyUI `/free` 卸载模型后重试一次（下一条视频要重新加载模型）。
+3. **权重缓存**：`PYTHONPATH=/content/vclib:/content/seed-vc`、`HF_HOME=/content/mj_vc/hf`、`TORCH_HOME=/content/mj_vc/torch`，Seed-VC 自己的权重在 `seed-vc/checkpoints`。
+   开了云端硬盘缓存时，第一次成功后把这三个目录打成 `mj_vc_weights.tar`（f0 模式 `mj_vc_weights_f0.tar`）后台传进同一个缓存文件夹，状态写 `/content/mj_vc_drive_status.json`，应用每分钟取一次记进缓存状态；之后的机器第一次用时先从云端硬盘拉这个包解开。
+- 来源：bench/vc_setup.sh、vc_gpu.sh、vc_run.sh、vc_cpu.sh（2026-11-21 在 A100 / CPU 运行时上跑通的手动流程）。应用内的这套代码只在沙盒里用假的 demucs / Seed-VC 走通过流程和 ffmpeg 混音，**没有在真 GPU 上跑过**。

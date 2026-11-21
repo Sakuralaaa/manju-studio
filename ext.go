@@ -184,6 +184,9 @@ func videoView(v *Video, base string) map[string]any {
 		out["file_url"] = fmt.Sprintf("%s/v1/videos/%d/file", base, v.ID)
 		out["bytes"] = v.Bytes
 	}
+	if v.VcStatus != "" {
+		out["voice_conversion"] = vcView(v, base)
+	}
 	return out
 }
 
@@ -232,12 +235,24 @@ func shotView(s *Shot, base string) map[string]any {
 		m["video_url"] = fmt.Sprintf("%s/v1/videos/%d/file", base, v.ID)
 	}
 	takes := []int64{}
+	versions := []map[string]any{}
 	for _, v := range s.Videos {
 		if v.Status == "done" {
 			takes = append(takes, v.ID)
+			if v.VcStatus != "" {
+				x := vcView(v, base)
+				x["take_id"] = v.ID
+				versions = append(versions, x)
+			}
 		}
 	}
 	m["takes"] = takes
+	if p, err := getProject(s.ProjectID); err == nil {
+		m["voice_unify"] = vcPreview(p, s)
+	}
+	if len(versions) > 0 {
+		m["take_voice"] = versions
+	}
 	return m
 }
 
@@ -662,8 +677,19 @@ func extVideoFile(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "视频还没有生成")
 		return
 	}
+	file := v.useFile()
+	switch r.URL.Query().Get("version") {
+	case "original":
+		file = v.File
+	case "converted":
+		if v.VcFile == "" {
+			httpErr(w, 404, "还没有统一音色后的版本")
+			return
+		}
+		file = v.VcFile
+	}
 	w.Header().Set("Content-Type", "video/mp4")
-	http.ServeFile(w, r, filepath.Join(dataDir, "videos", v.File))
+	http.ServeFile(w, r, filepath.Join(dataDir, "videos", file))
 }
 func extImageFile(w http.ResponseWriter, r *http.Request) {
 	im, err := getImage(pathID(r))
@@ -984,7 +1010,7 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 	case "ping":
 		return ok(map[string]any{})
 	case "tools/list":
-		return ok(map[string]any{"tools": append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), mcpTools...)})
+		return ok(map[string]any{"tools": append(append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), vcTools...), mcpTools...)})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -1002,6 +1028,9 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 		}
 		if errors.Is(err, errUnknownTool) {
 			v, err = callLibTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
+		}
+		if errors.Is(err, errUnknownTool) {
+			v, err = callVCTool(ctx, p.Name, p.Arguments, base)
 		}
 		if errors.Is(err, errUnknownTool) {
 			v, err = callTool(ctx, p.Name, p.Arguments, base)

@@ -112,8 +112,15 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | ③ 资产 | 从本集剧本补充提取资产（已有的不重复）；角色可做设定图、**定妆三视图**、**表情表**；每个角色设音色（可「从音色库选」，也能把设计候选 / Fish 音色 / 当前音色「收藏到音色库」）；「一键设计音色」给所有没音色的角色和旁白设计 |
 | ④ 分镜 | AI 拆镜头；每个镜头可选与上一镜头的衔接：不衔接 / 最后一帧作参考 / 最后一帧作首帧（首尾帧生成） |
 | ⑤ 关键帧 | 参考图按相关度挑选：本镜头最重要的角色（有台词、全剧出场多）用三视图，衔接时上一镜头最后一帧紧随其后，然后其余角色、场景、道具；超出渠道上限的改用文字描述；每个出场角色的固定造型（发型、服装、配饰）从外貌描述和人物小传里抽出来写进提示词。封面、表情表同样优先用定妆三视图作参考 |
-| ⑥ 视频 | 每个镜头抽 1–4 条（CU 估算随之变化），候选条带里预览、选用，可两条并排同步播放对比；首尾帧镜头等上一镜头出视频后再排队 |
+| ⑥ 视频 | 每个镜头抽 1–4 条（CU 估算随之变化），候选条带里预览、选用，可两条并排同步播放对比；首尾帧镜头等上一镜头出视频后再排队；可开「生成后统一音色」（见下），每条视频可切换原版 / 统一音色版、手动重做 |
 | ⑦ 成片 | **合成**：字幕、封面（生图模型渲染标题）、本集摘要；**配音**：逐句台词，可填语气、试听、单句重做；**配乐音效**：上传曲库，选曲、音量、淡入淡出、对白时自动压低，每个镜头可加音效；**导出**：成片、字幕、素材包、剪映草稿 |
+
+**生成后统一音色**（0.2.11，默认关）：作品设置或视频步骤顶部打开（每个镜头还能单独设「跟随作品 / 开 / 关」）。每条视频出来后，在同一台 Colab 视频运行时上用 demucs 把音轨分成人声 / 环境声，Seed-VC 把人声转成说话角色的**音色母带**，再和环境声混回去，存成这条视频的转换版；原版一直保留，可在视频卡片上切换「原版 / 统一音色」，成片、剪映草稿、打包下载都用选中的那一版。
+- 说话角色 = 镜头台词里唯一的说话角色；没有台词、只有旁白、多人对白、说话人不是资产里的角色、角色没有母带时跳过并写明原因（多人对白可手动指定角色重做）。
+- 母带：角色卡片上的「音色母带」按钮里选；默认自动用最长的原声参考（`voice_refs`，clone_voice / 音色库带来的），没有就用音色样本（MiMo / Fish 克隆或设计样本）；「另一时期」角色没有时用本体的。母带默认先用 demucs 去掉配乐、去首尾静音、响度归一。
+- Seed-VC / demucs 第一次用到时才装（有要统一音色的视频在排队时就在后台装，不占视频渲染时间），装到 `/content/vclib`，不动 ComfyUI 环境；开了云端硬盘缓存时，权重打成一个包缓存到同一个文件夹。
+- 参数在「算力 → 调度 → 生成后统一音色」：扩散步数 30、CFG 0.7、f0 关、语速 1×、母带去配乐开、母带最长 25 秒、转换完自动选用转换版（均为 2026-11-21 A100 实测用的参数）。
+- 只有在视频运行时（purpose=video）开着时才执行；运行时关着时手动重做会问要不要开机（不会因为只有统一音色任务而自动开机）。
 
 配音覆盖模式下，视频描述只让 H3 生成口型和环境声（不要人声），H3 原声按音量压低，逐句配音按镜头排开（超长时先压缩句间隔，再最多加速 1.5 倍），旁白作画外音。
 
@@ -165,7 +172,11 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `save_voice_to_library` | 收进音色库：`asset_id`（角色当前音色 + 原声参考）/ `sample` + `channel_id`（design_voice 候选、克隆样本）/ `project_id`（旁白）/ `fish_voice_id`；可带 `name`、`description`、`tags`、`gender`、`age`、`favorite`。样本复制进音色库，删作品不受影响；同一段样本不重复收 |
 | `apply_library_voice` | 把音色库的音色用到任意作品的角色（`asset_id`）或旁白（`project_id`）：复制样本、设好音色，音色库里有原声参考时替换角色 `voice_refs` |
 | `delete_library_voice` | 从音色库删除（`library_id`）；必须 `confirm=true`（不传只预览）。已用到角色上的音色不受影响 |
-| `get_video_link` | 视频 / 成片的限时下载地址与建议文件名（MCP 没有视频内容类型，下载到本地看） |
+| `get_video_link` | 视频 / 成片的限时下载地址与建议文件名（MCP 没有视频内容类型，下载到本地看）；`version` = `original` / `converted` 选统一音色前后的版本 |
+| `convert_take_voice` | 生成后统一音色：`shot_id` + 可选 `take_id`（不填 = 选用的那条）、`asset_id`（不填 = 自动找说话角色）；只排队，视频运行时开着时执行；`start_runtime=true` 才会开机 |
+| `pick_take_version` | `take_id` + `version`（`original` / `converted`）：成片 / 草稿 / 下载用哪一版 |
+| `set_voice_unify` | 作品默认（`project_id` + `on` / `off`）或镜头覆盖（`shot_id` + `inherit` / `on` / `off`） |
+| `set_voice_master` | 看 / 指定角色的音色母带：`asset_id`，`sample` = 候选样本名或 `auto`；不给 `sample` 只返回候选 |
 | `colab_status` | 运行时状态、排队数、已用 CU 估算、订阅 |
 | `colab_specs` | 可用运行时规格与每小时 CU |
 | `colab_start` | 开机：`purpose=video`（需 GPU，自动准备视频环境）或 `manual`（仅开机，可选 CPU） |
@@ -200,7 +211,11 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | POST | `/v1/colab/exec` | `{code, timeout_sec}` |
 | POST | `/v1/videos` | 提交视频（字段同 `video_submit`） |
 | GET | `/v1/videos/{id}` | 视频状态 |
-| GET | `/v1/videos/{id}/file` | 下载视频 |
+| GET | `/v1/videos/{id}/file` | 下载视频（`?version=original` / `converted`，默认选用的那一版） |
+| POST | `/v1/videos/{id}/voice-convert` | `{asset_id?}` 统一音色（排队） |
+| POST | `/v1/videos/{id}/version` | `{use: original \| converted}` |
+| PUT | `/v1/shots/{id}/voice-unify` | `{mode: inherit \| on \| off}` |
+| GET / PUT | `/v1/assets/{id}/vc-master` | 角色音色母带：候选与当前 / `{sample}`（`auto` 恢复自动） |
 | GET | `/v1/projects` | 作品列表 |
 | GET | `/v1/projects/{id}/shots` | 分镜 |
 | GET | `/v1/projects/{id}/episodes` | 设定集与各集 |

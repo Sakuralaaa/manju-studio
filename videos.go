@@ -56,18 +56,40 @@ type Video struct {
 	StartedAt     int64     `json:"started_at"`
 	FinishedAt    int64     `json:"finished_at"`
 	Position      int       `json:"position,omitempty"`
+	// 生成后统一音色：原版（File）一直保留，转换版存 VcFile；VcUse 决定成片 / 下载用哪一版
+	VcStatus  string         `json:"vc_status"` // '' 没做 / auto 等视频出来后自动做 / queued / running / done / failed / skipped
+	VcFile    string         `json:"-"`
+	VcURL     string         `json:"vc_url"`
+	VcError   string         `json:"vc_error"` // 失败原因或跳过原因
+	VcAssetID int64          `json:"vc_asset_id"`
+	VcUse     bool           `json:"vc_use"`
+	VcInfo    map[string]any `json:"vc_info"`
+	VcAt      int64          `json:"vc_at"`
 }
 
-const videoCols = `id,project_id,episode_id,shot_id,source,status,progress,stage,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,file,bytes,error,post,est_cu,created_at,started_at,finished_at`
+// useFile 成片 / 下载用的那一版：选了转换版且转换版存在时用转换版，否则原版
+func (v *Video) useFile() string {
+	if v.VcUse && v.VcFile != "" {
+		return v.VcFile
+	}
+	return v.File
+}
+
+const videoCols = `id,project_id,episode_id,shot_id,source,status,progress,stage,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,file,bytes,error,post,est_cu,created_at,started_at,finished_at,vc_status,vc_file,vc_error,vc_asset_id,vc_use,vc_info,vc_at`
 
 func scanVideoNoPos(sc interface{ Scan(...any) error }) (*Video, error) {
 	var v Video
-	var turbo int
-	var post string
-	if err := sc.Scan(&v.ID, &v.ProjectID, &v.EpisodeID, &v.ShotID, &v.Source, &v.Status, &v.Progress, &v.Stage, &v.Prompt, &v.ImageFile, &v.LastImageFile, &v.Seconds, &v.Res, &v.Aspect, &turbo, &v.Seed, &v.File, &v.Bytes, &v.Error, &post, &v.EstCU, &v.CreatedAt, &v.StartedAt, &v.FinishedAt); err != nil {
+	var turbo, vcUse int
+	var post, vcInfo string
+	if err := sc.Scan(&v.ID, &v.ProjectID, &v.EpisodeID, &v.ShotID, &v.Source, &v.Status, &v.Progress, &v.Stage, &v.Prompt, &v.ImageFile, &v.LastImageFile, &v.Seconds, &v.Res, &v.Aspect, &turbo, &v.Seed, &v.File, &v.Bytes, &v.Error, &post, &v.EstCU, &v.CreatedAt, &v.StartedAt, &v.FinishedAt,
+		&v.VcStatus, &v.VcFile, &v.VcError, &v.VcAssetID, &vcUse, &vcInfo, &v.VcAt); err != nil {
 		return nil, err
 	}
-	v.Turbo = turbo == 1
+	v.Turbo, v.VcUse = turbo == 1, vcUse == 1
+	_ = json.Unmarshal([]byte(vcInfo), &v.VcInfo)
+	if v.VcFile != "" {
+		v.VcURL = "/files/videos/" + v.VcFile
+	}
 	_ = json.Unmarshal([]byte(post), &v.Post)
 	if v.File != "" {
 		v.URL = "/files/videos/" + v.File
@@ -163,8 +185,12 @@ func enqueueVideo(in videoIn) (int64, error) {
 		per += cfg.InterpMin
 	}
 	est := per / 60 * cfg.rate(cfg.Accelerator)
-	res, err := db.Exec(`INSERT INTO videos(project_id,episode_id,shot_id,source,status,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,post,est_cu,created_at) VALUES(?,?,?,?, 'queued', ?,?,?,?,?,?,?,?,?,?,?)`,
-		in.ProjectID, in.EpisodeID, in.ShotID, in.Source, in.Prompt, in.ImageFile, in.LastImageFile, in.Seconds, in.Res, in.Aspect, b2i(in.Turbo), in.Seed, mustJSON(in.Post), est, now())
+	vcSt := ""
+	if in.ShotID > 0 && shotWantsVC(in.ShotID) {
+		vcSt = "auto" // 视频出来后自动转成说话角色的音色
+	}
+	res, err := db.Exec(`INSERT INTO videos(project_id,episode_id,shot_id,source,status,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,post,est_cu,created_at,vc_status) VALUES(?,?,?,?, 'queued', ?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.ProjectID, in.EpisodeID, in.ShotID, in.Source, in.Prompt, in.ImageFile, in.LastImageFile, in.Seconds, in.Res, in.Aspect, b2i(in.Turbo), in.Seed, mustJSON(in.Post), est, now(), vcSt)
 	if err != nil {
 		return 0, err
 	}
@@ -398,6 +424,9 @@ func cancelVideo(id int64) error {
 		if v.File != "" {
 			_ = os.Remove(filepath.Join(dataDir, "videos", v.File))
 		}
+		if v.VcFile != "" {
+			_ = os.Remove(filepath.Join(dataDir, "videos", v.VcFile))
+		}
 		_, _ = db.Exec(`UPDATE shots SET picked_video_id=0 WHERE picked_video_id=?`, id)
 		_, _ = db.Exec(`DELETE FROM videos WHERE id=?`, id)
 	}
@@ -441,7 +470,7 @@ func handleVideoList(w http.ResponseWriter, r *http.Request) {
 		}
 		mins += per
 	}
-	writeJSON(w, map[string]any{"videos": vs, "titles": titles, "queue_minutes": mins})
+	writeJSON(w, map[string]any{"videos": vs, "titles": titles, "queue_minutes": mins, "vc_pending": vcPendingCount()})
 }
 
 // ---------- 上一镜头最后一帧 ----------
@@ -605,7 +634,7 @@ func buildTimeline(p *Project, e *Episode) (*timeline, error) {
 			missing++
 			continue
 		}
-		path := filepath.Join(dataDir, "videos", v.File)
+		path := filepath.Join(dataDir, "videos", v.useFile())
 		ci, err := probe(path)
 		if err != nil {
 			return nil, fmt.Errorf("镜头 %s：%s", s.Code, err.Error())
@@ -990,7 +1019,7 @@ func handleEpisodeExport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if v := shotVideoFor(s); v != nil {
-			z.addFile(fmt.Sprintf("镜头视频/%s%s", s.Code, filepath.Ext(v.File)), filepath.Join(dataDir, "videos", v.File))
+			z.addFile(fmt.Sprintf("镜头视频/%s%s", s.Code, filepath.Ext(v.useFile())), filepath.Join(dataDir, "videos", v.useFile()))
 		}
 	}
 	for _, l := range listLines(`WHERE episode_id=? ORDER BY shot_id, sort`, e.ID) {

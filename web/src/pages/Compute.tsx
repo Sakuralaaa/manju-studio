@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, CloudUpload, ExternalLink, FileJson, KeyRound, Play, Power, RefreshCw, RotateCcw, Terminal, Trash2, X } from 'lucide-react'
-import { api, type ColabCfg, type ColabState, type LedgerRow, type LedgerTotal, type Video, type WorkflowItem } from '../api'
+import { api, type VCCfg, type ColabCfg, type ColabState, type LedgerRow, type LedgerTotal, type Video, type WorkflowItem } from '../api'
 import { useStore } from '../store'
 import { Empty, Segmented, Select, Spinner, copyText, useInterval, useMedia } from '../components/ui'
 import { PageHead } from './Projects'
@@ -348,7 +348,54 @@ function Schedule({ st, reload }: { st: ColabState; reload: () => void }) {
         {!st.cfg.drive_cache && d && d.files > 0 && <div className="row-actions"><span className="grow" /><button className="btn btn-ghost btn-sm" onClick={() => confirm('清空缓存记录？云端硬盘里的文件不会删除。') && api('/api/colab/drive/reset', { method: 'POST' }).then(reload)}>清空缓存记录</button></div>}
       </section>
       <div className="row-actions"><span className="grow" /><button className="btn btn-primary" onClick={save}><Check size={16} />保存</button></div>
+      <VoiceConvCard />
     </div>
+  )
+}
+
+// 生成后统一音色的参数（Seed-VC + demucs，跑在视频运行时上）
+function VoiceConvCard() {
+  const { toast } = useStore()
+  const [c, setC] = useState<VCCfg | null>(null)
+  const [def, setDef] = useState<VCCfg | null>(null)
+  useEffect(() => { api<{ cfg: VCCfg; defaults: VCCfg }>('/api/voice-conv/settings').then(r => { setC(r.cfg); setDef(r.defaults) }).catch(() => {}) }, [])
+  if (!c || !def) return null
+  const save = async (x: VCCfg) => {
+    try { const r = await api<{ cfg: VCCfg }>('/api/voice-conv/settings', { method: 'PUT', body: x }); setC(r.cfg); toast('已保存') } catch (e: any) { toast(e.message, 'err') }
+  }
+  const num = (k: keyof VCCfg, label: string, step: number, min: number, max: number, unit = '') => (
+    <label className="field"><span className="field-label">{label}</span>
+      <div className="unit-input"><input className="input" type="number" step={step} min={min} max={max} value={c[k] as number} onChange={e => setC({ ...c, [k]: Number(e.target.value) })} /><span>{unit || ' '}</span></div>
+    </label>
+  )
+  const onOff = (k: keyof VCCfg, label: string, on = '开启', off = '关闭') => (
+    <div className="field"><span className="field-label">{label}</span>
+      <Segmented value={c[k] ? 'on' : 'off'} onChange={v => setC({ ...c, [k]: v === 'on' })} options={[{ value: 'off', label: off }, { value: 'on', label: on }]} />
+    </div>
+  )
+  return (
+    <section className="card gcard">
+      <div className="gcard-head"><h3>生成后统一音色</h3><span className="muted">demucs 分离人声 + Seed-VC，跑在视频运行时上</span></div>
+      <p className="muted sm-text">作品设置或视频步骤里打开后，每条视频出来就把人声转成说话角色的音色母带（第一次会先装 Seed-VC / demucs，约几分钟，视频渲染期间就开始装；开了云端硬盘缓存时权重也会缓存）。每条约 1 分钟。</p>
+      <div className="vcfg-grid">
+        {num('diffusion_steps', '扩散步数', 1, 4, 100, '步')}
+        {num('cfg_rate', 'CFG 强度', 0.05, 0, 1)}
+        {onOff('f0', '音高条件 f0（较慢）', '开', '关')}
+        {c.f0 && onOff('auto_f0', '自动对齐音高')}
+        {c.f0 && num('semi_tone', '升降半音', 1, -12, 12, '半音')}
+        {num('length_adjust', '语速倍数', 0.05, 0.5, 2, '×')}
+        {onOff('separate_master', '母带先去掉配乐')}
+        {num('max_master_sec', '母带最长', 1, 3, 60, '秒')}
+        {num('vocal_gain', '转换后人声音量', 0.1, 0.1, 4, '×')}
+        {onOff('auto_use', '转换完自动选用', '选用转换版', '保持原版')}
+      </div>
+      <div className="row-actions">
+        <span className="muted sm-text">默认：{def.diffusion_steps} 步 · CFG {def.cfg_rate} · f0 关 · 语速 1×</span>
+        <span className="grow" />
+        <button className="btn btn-ghost btn-sm" onClick={() => save(def)}><RotateCcw size={14} />恢复默认</button>
+        <button className="btn btn-secondary btn-sm" onClick={() => save(c)}><Check size={14} />保存</button>
+      </div>
+    </section>
   )
 }
 

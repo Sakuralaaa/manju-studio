@@ -1498,13 +1498,22 @@ func handleSignedDL(w http.ResponseWriter, r *http.Request) {
 	}
 	var file string
 	switch kind {
-	case "v":
+	case "v", "vo", "vc":
 		v, err := getVideo(id)
 		if err != nil || v.File == "" {
 			httpErr(w, 404, "视频不存在")
 			return
 		}
-		file = v.File
+		file = v.useFile()
+		if kind == "vo" {
+			file = v.File
+		} else if kind == "vc" {
+			file = v.VcFile
+		}
+		if file == "" {
+			httpErr(w, 404, "视频不存在")
+			return
+		}
 	case "f":
 		e, err := getEpisode(id)
 		if err != nil || e.FinalFile == "" {
@@ -1521,9 +1530,10 @@ func handleSignedDL(w http.ResponseWriter, r *http.Request) {
 }
 
 type videoLinkArgs struct {
-	VideoID   int64 `json:"video_id"`
-	ShotID    int64 `json:"shot_id"`
-	EpisodeID int64 `json:"episode_id"`
+	VideoID   int64  `json:"video_id"`
+	ShotID    int64  `json:"shot_id"`
+	EpisodeID int64  `json:"episode_id"`
+	Version   string `json:"version"` // 空 = 当前选用的那一版；original = 原版；converted = 统一音色后的版本
 }
 
 func toolVideoLink(ctx context.Context, raw json.RawMessage, base string) (any, error) {
@@ -1561,14 +1571,33 @@ func toolVideoLink(ctx context.Context, raw json.RawMessage, base string) (any, 
 		if v.Status != "done" || v.File == "" {
 			return nil, fmt.Errorf("视频 #%d 还没有完成（%s）", v.ID, v.Status)
 		}
-		url = base + "/v1/dl/" + signDL("v", v.ID, ttl)
-		name = fmt.Sprintf("manju_video_%d.mp4", v.ID)
+		kind, suffix, file := "v", "", v.useFile()
+		switch a.Version {
+		case "original":
+			kind, file = "vo", v.File
+		case "converted":
+			if v.VcFile == "" {
+				return nil, fmt.Errorf("视频 #%d 还没有统一音色后的版本（%s）", v.ID, vcStatusText(v))
+			}
+			kind, file = "vc", v.VcFile
+		case "":
+		default:
+			return nil, errors.New("version 只能是 original / converted（或不填 = 当前选用的版本）")
+		}
+		if file == v.VcFile && file != "" {
+			suffix = "_vc"
+		}
+		url = base + "/v1/dl/" + signDL(kind, v.ID, ttl)
+		name = fmt.Sprintf("manju_video_%d%s.mp4", v.ID, suffix)
 		if v.EpisodeID > 0 {
 			if e, err := getEpisode(v.EpisodeID); err == nil {
-				name = fmt.Sprintf("manju_ep%02d_shot%d_v%d.mp4", e.No, v.ShotID, v.ID)
+				name = fmt.Sprintf("manju_ep%02d_shot%d_v%d%s.mp4", e.No, v.ShotID, v.ID, suffix)
 			}
 		}
 		bytesN, secs = v.Bytes, float64(v.Seconds)
+		if fi, err := os.Stat(filepath.Join(dataDir, "videos", file)); err == nil {
+			bytesN = fi.Size()
+		}
 	case a.EpisodeID > 0:
 		_, e, err := epCtx(a.EpisodeID)
 		if err != nil {
@@ -1669,8 +1698,9 @@ var writerTools = []mcpTool{
 	{"listen_dub", "听台词配音：返回音频内容块（audio/mpeg 等，按 MCP 规范 base64）。按 line_id、shot_id 或 episode_id 取，每次最多 8 段。", obj(map[string]any{
 		"episode_id": num("集编号"), "shot_id": num("镜头编号"), "line_id": num("台词编号"), "limit": num("最多返回几段音频，1–8，默认 4"),
 	})},
-	{"get_video_link", "拿视频的限时下载地址（2 小时有效，不需要密钥）和建议文件名。MCP 没有视频内容类型：请用终端下载到工作区（curl -fL -o 文件名 地址）再看。给 video_id、shot_id（选定视频）或 episode_id（成片）。", obj(map[string]any{
+	{"get_video_link", "拿视频的限时下载地址（2 小时有效，不需要密钥）和建议文件名。MCP 没有视频内容类型：请用终端下载到工作区（curl -fL -o 文件名 地址）再看。给 video_id、shot_id（选定视频）或 episode_id（成片）。做过「生成后统一音色」的视频可用 version 选原版或转换版（默认当前选用的那一版）。", obj(map[string]any{
 		"video_id": num("视频编号"), "shot_id": num("镜头编号"), "episode_id": num("集编号（取成片）"),
+		"version": enumS("视频版本：original = 原版；converted = 统一音色后的版本；不填 = 当前选用的那一版", "original", "converted"),
 	})},
 }
 

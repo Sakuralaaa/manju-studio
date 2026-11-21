@@ -20,6 +20,14 @@ export interface Video {
   prompt: string; image_url: string; last_image_url: string; seconds: number; res: string; aspect: string; turbo: boolean; seed: number
   url: string; bytes: number; error: string; post: { upscale?: boolean; interp?: boolean }; est_cu: number
   created_at: number; started_at: number; finished_at: number; position?: number
+  vc_status: '' | 'auto' | 'queued' | 'running' | 'done' | 'failed' | 'skipped'; vc_url: string; vc_error: string; vc_asset_id: number; vc_use: boolean
+  vc_info: Record<string, any> | null; vc_at: number
+}
+export interface VcMasterCand { sample: string; label: string; source: 'ref' | 'voice'; duration: number; url: string }
+export interface VcMasterView { asset_id: number; name: string; chosen: string; candidates: VcMasterCand[]; current?: VcMasterCand; how?: string }
+export interface VCCfg {
+  diffusion_steps: number; cfg_rate: number; f0: boolean; auto_f0: boolean; semi_tone: number; length_adjust: number
+  separate_master: boolean; max_master_sec: number; vocal_gain: number; auto_use: boolean; repo: string
 }
 export interface VoiceSpec {
   channel_id?: number; mode?: 'fish' | 'builtin' | 'design' | 'clone' | 'openai'; voice?: string; title?: string; desc?: string
@@ -38,7 +46,7 @@ export interface Project {
   text_channel_id: number; text_model: string; image_channel_id: number; image_model: string
   video_sec: number; video_res: string; video_turbo: boolean
   world: string; bios: string; outline: string; episodes_plan: number; audio_mode: 'native' | 'dub'; orig_volume: number; takes: number
-  narrator_voice: VoiceSpec; voice_channel_id: number; deliver: 'source' | '1080p'; post_upscale: boolean; post_interp: boolean
+  narrator_voice: VoiceSpec; voice_channel_id: number; deliver: 'source' | '1080p'; post_upscale: boolean; post_interp: boolean; voice_unify: boolean
   created_at: number; updated_at: number
 }
 export interface Episode {
@@ -53,11 +61,12 @@ export interface ProjectCard extends Project { cover: string; episodes: number; 
 export interface Asset {
   id: number; project_id: number; kind: 'character' | 'scene' | 'prop'; code: string; name: string; description: string; prompt: string
   picked_image_id: number; sheet_image_id: number; expr_image_id: number; voice: VoiceSpec; sort: number; images: Img[]; appear: number; base_id: number
+  voice_refs?: LibVoiceRef[]; vc_master?: string
 }
 export interface Shot {
   id: number; project_id: number; episode_id: number; sort: number; code: string; duration: number; camera: string; action: string; dialogue: string
   assets: string[]; keyframe_prompt: string; video_prompt: string; picked_image_id: number; picked_video_id: number
-  chain: 'off' | 'ref' | 'first'; sfx_url: string; sfx_name: string; sfx_volume: number; images: Img[]; videos: Video[]; ref_images: Img[]
+  chain: 'off' | 'ref' | 'first'; sfx_url: string; sfx_name: string; sfx_volume: number; voice_unify: '' | 'on' | 'off'; images: Img[]; videos: Video[]; ref_images: Img[]
 }
 export interface Line {
   id: number; episode_id: number; shot_id: number; sort: number; speaker: string; asset_id: number; kind: 'dialogue' | 'narration'

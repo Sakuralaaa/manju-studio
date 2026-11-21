@@ -99,6 +99,10 @@ export default function Setup() {
                 {!!p.narrator_voice?.mode && <LibSaveBtn name={`${p.title}的旁白`} body={{ project_id: p.id }} />}
               </div>
             </>}
+            <div className="field"><span className="field-label">生成后统一音色</span>
+              <Segmented value={f.voice_unify ? 'on' : 'off'} onChange={v => { setF({ ...f, voice_unify: v === 'on' }); save('voice_unify', v === 'on') }} options={[{ value: 'off', label: '关闭' }, { value: 'on', label: '开启' }]} />
+              <span className="muted sm-text">视频出来后在 Colab 上分离人声，用 Seed-VC 转成说话角色的音色母带再混回去，原版保留，可在视频步骤里切换；镜头可单独开关</span>
+            </div>
             <div className="field"><span className="field-label">交付画质</span>
               <Segmented value={f.deliver} onChange={v => { setF({ ...f, deliver: v as any }); save('deliver', v) }} options={[{ value: 'source', label: '原始尺寸' }, { value: '1080p', label: '1080p' }]} />
             </div>

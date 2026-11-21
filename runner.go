@@ -468,6 +468,10 @@ func (r *Runner) tick() {
 		r.driveAt = time.Now()
 		go r.driveSync()
 	}
+	// 生成后统一音色：刚出来的视频先转音色，再排下一条视频
+	if purpose == "video" && booted && r.runVoiceNext(cfg) {
+		return
+	}
 	if queued > 0 && purpose == "video" && booted {
 		r.runNext(cfg)
 		return

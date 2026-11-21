@@ -50,6 +50,7 @@ func projectProps() map[string]any {
 		"audio_mode":  enumS("声音：native = 用视频模型自带的声音（对白、环境声）；dub = 用配音（TTS）替换对白，原声按 orig_volume 压低", "native", "dub"),
 		"orig_volume": numF("dub 模式下视频原声音量 0–1"), "takes": num("每个镜头默认抽卡次数 1–4"),
 		"deliver": enumS("成片规格：source = 原分辨率；1080p = 放大到 1080p", "source", "1080p"), "post_upscale": boolp("视频后处理：超分"), "post_interp": boolp("视频后处理：补帧"),
+		"voice_unify": boolp("生成后统一音色（默认关）：每条视频出来后在 Colab 上分离人声，用 Seed-VC 转成说话角色的音色母带再混回去，原版保留；镜头可用 set_voice_unify 单独开关"),
 	}
 }
 
@@ -646,7 +647,7 @@ func projectBrief(p *Project) map[string]any {
 		"episode_sec": p.EpisodeSec, "shot_target": p.ShotTarget, "episodes_plan": p.EpisodesPlan,
 		"image_channel_id": p.ImageChannelID, "image_model": p.ImageModel, "text_channel_id": p.TextChannelID, "text_model": p.TextModel,
 		"voice_channel_id": p.VoiceChannelID, "video_sec": p.VideoSec, "video_res": p.VideoRes, "video_turbo": p.VideoTurbo,
-		"audio_mode": p.AudioMode, "orig_volume": p.OrigVolume, "takes": p.Takes, "deliver": p.Deliver, "post_upscale": p.PostUpscale, "post_interp": p.PostInterp}
+		"audio_mode": p.AudioMode, "orig_volume": p.OrigVolume, "takes": p.Takes, "deliver": p.Deliver, "post_upscale": p.PostUpscale, "post_interp": p.PostInterp, "voice_unify": p.VoiceUnify}
 }
 
 func toolCreateProject(ctx context.Context, raw json.RawMessage) (any, error) {

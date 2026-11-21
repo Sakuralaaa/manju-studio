@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowRight, ListPlus, Play, Power, RotateCcw, X, Cpu, Columns2, Check, Link2 } from 'lucide-react'
+import { ArrowRight, ListPlus, Play, Power, RotateCcw, X, Cpu, Columns2, Check, Link2, Wand2 } from 'lucide-react'
+import { ShotUnify, TakeVoice } from './VoiceUnify'
 import { api, type ColabState, type Shot, type Video } from '../../api'
 import { useProject, StepHead, Cost } from '../Project'
 import { useStore } from '../../store'
@@ -84,6 +85,8 @@ export default function Videos() {
   return (
     <section className="stepview">
       <StepHead title="视频" note={`${p.video_res} · ${p.video_turbo ? 'Turbo 8 步' : '标准 20 步'}${p.post_upscale ? ' · 放大' : ''}${p.post_interp ? ' · 补帧' : ''}`}>
+        <button className={`btn btn-secondary ${p.voice_unify ? 'is-on' : ''}`} onClick={() => patch({ voice_unify: !p.voice_unify })}
+          title="生成后统一音色：每条视频出来后在 Colab 上分离人声，用 Seed-VC 转成说话角色的音色母带再混回去，原版保留"><Wand2 size={16} />统一音色<Cost>{p.voice_unify ? '开' : '关'}</Cost></button>
         <Segmented size="sm" block={false} value={String(p.takes)} onChange={v => patch({ takes: Number(v) })} options={[1, 2, 3, 4].map(n => ({ value: String(n), label: `每镜 ${n} 条` }))} />
         <button className="btn btn-secondary" disabled={need === 0} onClick={() => queueAll(false)}><ListPlus size={16} />全部排队<Cost>{need} 段</Cost></button>
         {off && !autoOn && <button className="btn btn-secondary" disabled={need === 0 || !st?.runner.authorized} onClick={() => queueAll(true)}><Play size={16} />排队并开机<CU st={st} n={need + (st?.runner.queued || 0)} turbo={p.video_turbo} post={post} /></button>}
@@ -103,6 +106,7 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
   const p = data.project
   const [cmp, setCmp] = useState(false)
   const [view, setView] = useState<number | null>(null)
+  const [ver, setVer] = useState<'original' | 'converted' | null>(null)
   const kf = s.images.find(i => i.id === s.picked_image_id)
   const actives = s.videos.filter(v => v.status === 'running' || v.status === 'queued')
   const active = actives.find(v => v.status === 'running') || actives[0]
@@ -113,6 +117,8 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
   const failNewer = lastFail && (!chosen || lastFail.id > chosen.id) && !active
   const waitPrev = s.chain === 'first' && !!prev && !prev.videos.some(v => v.status === 'done')
   const post = { upscale: p.post_upscale, interp: p.post_interp }
+  const shownVer = shown ? (ver ?? (shown.vc_use && shown.vc_url ? 'converted' : 'original')) : 'original'
+  const shownSrc = shown ? (shownVer === 'converted' && shown.vc_url ? shown.vc_url : shown.url) : ''
   return (
     <article className="card kcard vcard">
       <div className="kcard-head">
@@ -123,7 +129,7 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
         <span className="muted sm-text">{Math.round(s.duration)} 秒</span>
       </div>
       <div className={`frame ${arClass(p.aspect)}`}>
-        {shown && !active ? <video key={shown.id} src={shown.url} poster={kf?.url} controls playsInline preload="none" /> :
+        {shown && !active ? <video key={`${shown.id}-${shownVer}`} src={shownSrc} poster={kf?.url} controls playsInline preload="none" /> :
           kf ? <img src={kf.url} alt="" /> : <div className="frame-empty"><span>缺关键帧</span></div>}
         {active && <VideoState v={active} more={actives.length - 1} />}
       </div>
@@ -136,7 +142,7 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
       {done.length > 1 && (
         <div className="takes">
           {done.map((v, i) => (
-            <button key={v.id} className={`take ${shown?.id === v.id ? 'is-view' : ''} ${chosen?.id === v.id ? 'is-on' : ''}`} onClick={() => setView(v.id)} title={chosen?.id === v.id ? '已选用' : '预览'}>
+            <button key={v.id} className={`take ${shown?.id === v.id ? 'is-view' : ''} ${chosen?.id === v.id ? 'is-on' : ''}`} onClick={() => { setView(v.id); setVer(null) }} title={chosen?.id === v.id ? '已选用' : '预览'}>
               {kf && <img src={kf.url} alt="" />}<b>{i + 1}</b>{chosen?.id === v.id && <i><Check size={10} strokeWidth={3} /></i>}
             </button>
           ))}
@@ -145,6 +151,8 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
           <button className="icon-btn sm" onClick={() => setCmp(true)} aria-label="对比" title="对比"><Columns2 size={14} /></button>
         </div>
       )}
+      {shown && !active && <TakeVoice v={shown} st={st} onView={setVer} />}
+      {!!s.dialogue.trim() && <ShotUnify s={s} />}
       <div className="acard-foot">
         {active ? (
           <button className="btn btn-secondary btn-sm" onClick={() => Promise.all(actives.map(v => api(`/api/videos/${v.id}/cancel`, { method: 'POST' }))).then(() => run(async () => {}))}><X size={14} />取消</button>
@@ -173,7 +181,7 @@ function Compare({ s, vids, chosen, onClose }: { s: Shot; vids: Video[]; chosen?
           return (
             <div key={k} className="cmp-col">
               <Segmented size="sm" value={String(pair[k])} onChange={x => setPair(pair.map((y, j) => j === k ? Number(x) : y))} options={vids.map((x, i) => ({ value: String(x.id), label: `第 ${i + 1} 条` }))} />
-              <div className={`frame ${arClass(data.project.aspect)}`}>{v && <video ref={refs[k]} src={v.url} controls playsInline loop />}</div>
+              <div className={`frame ${arClass(data.project.aspect)}`}>{v && <video ref={refs[k]} src={v.vc_use && v.vc_url ? v.vc_url : v.url} controls playsInline loop />}</div>
               {v && (chosen === v.id ? <span className="pill-tag is-ok"><Check size={12} />已选用</span> :
                 <button className="btn btn-secondary btn-sm" onClick={() => run(() => api(`/api/videos/${v.id}/pick`, { method: 'POST' }), '已选用')}><Check size={14} />选用这条</button>)}
             </div>
