@@ -160,6 +160,9 @@ func migrate() error {
 	if _, err := db.Exec(schemaVoiceLib); err != nil {
 		return err
 	}
+	if _, err := db.Exec(schemaVoiceCands); err != nil {
+		return err
+	}
 	for _, c := range addCols {
 		if !hasCol(c.table, c.col) {
 			if _, err := db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.col + ` ` + c.def); err != nil {

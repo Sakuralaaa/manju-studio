@@ -100,6 +100,10 @@ description: 漫剧工坊外部编剧规则
 | `view_shot` | 镜头文字 + 关键帧 + 选定视频的第一帧和最后一帧（图片块） |
 | `listen_dub` | 台词配音：`{"type":"audio","data":<base64>,"mimeType":"audio/mpeg"}`（MCP 2025-03-26 起支持音频块；客户端协商 2024-11-05 时改给音频地址），每次最多 8 段、合计 ≤ 10 MB |
 | `get_video_link` | 视频的限时下载地址（2 小时，不需要密钥）+ 建议文件名。**MCP 没有视频内容类型**，请让智能体用 `curl -fL -o <filename> "<url>"` 下载到工作区再看 |
+| `get_audio_link` | 音频的限时下载地址（2 小时，不需要密钥）+ 文件名、时长、念的文字：`sample(s)`、`asset_id`（`which` = `sample` / `refs` / `master` / `candidates`，默认全部）、`project_id`（旁白）、`library_id`、`line_id` |
+| `export_voice_candidates` | `project_id`（可选 `asset_ids`）：把各角色的设计候选、当前音色、原声参考、母带（和旁白）打成一个 zip，返回一个限时下载地址；包内文件名全是 ASCII（`C01_asset10_cand1_vd-xxx.wav`），附 `manifest.txt` / `manifest.json`（文件 → 角色、候选序号、原始样本名、时长、文字、是否当前绑定） |
+
+0.2.12：**宿主不转音频块时也能听**。Antigravity 实测不会把 MCP 音频内容块交给 Gemini（模型只看到「样本 vd-xxx.wav」这样的文字），而 `/v1/audio/` 要密钥、模型下载不了。现在所有返回音频的工具（`design_voice`、`listen_voice`、`clone_voice`、`listen_dub`，以及结果里提到音频的 `set_voice`、`tts`、`list_voice_library`、`save_voice_to_library`、`apply_library_voice`、`set_voice_master`、`convert_take_voice` 等）都在**文字**里写明每段的文件名、时长、念的文字和 2 小时有效的免密钥下载地址（`/v1/dl/`，与 `get_video_link` 同一套签名），智能体 `curl` / `Invoke-WebRequest` 下到工作区再 `read_file`。新增 `get_audio_link`、`export_voice_candidates`、`add_voice_candidates`（把 0.2.12 以前设计的样本补登为某角色的候选）。`design_voice` 的候选按角色存下来，网页音色面板「设计音色」页能看到、试听、选用（标注「外部智能体」）；`set_voice` 可以绑定任何一次设计出来的候选，`channel_id` 不填时用当初设计它的渠道。
 
 0.2.11 新增：生成后统一音色——`convert_take_voice`（把一条视频的人声转成说话角色的音色母带，原版保留）、`pick_take_version`（原版 / 转换版）、`set_voice_unify`（作品默认 / 镜头覆盖）、`set_voice_master`（看 / 指定母带）；`update_project` / `create_project` 新增 `voice_unify`；`get_video_link` 新增 `version`；`list_shots` / `get_episode` 的镜头带 `voice_unify`（是否开启、说话角色、母带、跳过原因）和 `take_voice`（每条视频的统一音色状态）。
 
@@ -126,4 +130,4 @@ description: 漫剧工坊外部编剧规则
 
 **已验证**（本地，模拟上游，`livetest/writer_test.py`，95 项）：只用 MCP JSON-RPC 模拟编剧，从空设定集一路写到资产图、音色、关键帧、配音完成、视频排队；全程没有调用文本模型；图片块 / 音频块是合法 base64，mimeType 与文件头一致；限时下载链接可下载、篡改即 403；桥接程序（initialize、tools/list、图片工具、错误密钥）。
 
-**未验证**：没有在真实的 Antigravity 客户端里连过（沙盒里没有 Antigravity）；Antigravity 是否会把 MCP 返回的图片块、音频块交给 Gemini 看 / 听，官方文档没有写明，需要在真机上确认——如果它只转文字，`view_shot` / `view_asset_images` 仍会返回文字说明，可以改用 `get_video_link` 或图片地址让智能体下载。
+**未验证**：没有在真实的 Antigravity 客户端里连过（沙盒里没有 Antigravity）；Antigravity 是否会把 MCP 返回的图片块交给 Gemini 看，官方文档没有写明；音频块据用户的智能体反馈**不会**交给模型（0.2.12 起每段音频都在文字里给下载地址，见上）。如果图片块也只转文字，`view_shot` / `view_asset_images` 仍会返回文字说明，可以改用 `get_video_link` 或图片地址让智能体下载。

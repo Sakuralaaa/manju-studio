@@ -768,7 +768,11 @@ func designOnce(ctx context.Context, ch *Channel, desc, text string) (string, fl
 	if err != nil {
 		return "", 0, err
 	}
-	return saveAudio("vd", data, "wav")
+	name, dur, err := saveAudio("vd", data, "wav")
+	if err == nil && strings.TrimSpace(text) != "" {
+		_ = os.WriteFile(filepath.Join(dataDir, "audio", name+".txt"), []byte(strings.TrimSpace(text)), 0o644)
+	}
+	return name, dur, err
 }
 
 // handleVoiceDesign 用音色描述生成 2–3 个候选试听样本
@@ -779,6 +783,7 @@ func handleVoiceDesign(w http.ResponseWriter, r *http.Request) {
 		Text      string `json:"text"`
 		N         int    `json:"n"`
 		ProjectID int64  `json:"project_id"`
+		AssetID   int64  `json:"asset_id"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, err.Error())
@@ -812,6 +817,7 @@ func handleVoiceDesign(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	saveVoiceCands(in.ProjectID, in.AssetID, ch, strings.TrimSpace(in.Desc), text, names, durs, "web")
 	res := []*cand{}
 	for i, nm := range names {
 		res = append(res, &cand{Sample: nm, URL: "/files/audio/" + nm, Duration: durs[i]})
@@ -1153,9 +1159,11 @@ func designAllTask(p *Project) (int64, error) {
 			desc, text, err := draftVoiceDesc(ctx, p, a)
 			if err == nil {
 				var names []string
-				names, _, err = designCandidates(ctx, ch, desc, text, 1)
+				var durs []float64
+				names, durs, err = designCandidates(ctx, ch, desc, text, 1)
 				ledgerAdd(p.ID, 0, "tts", 1, 0, 0, 0, "")
 				if err == nil {
+					saveVoiceCands(p.ID, a.ID, ch, desc, text, names, durs, "auto")
 					var v VoiceSpec
 					v, err = designedVoiceSpec(ctx, ch, names[0], a.Name+"的声音", desc, text)
 					if err == nil {
@@ -1170,9 +1178,10 @@ func designAllTask(p *Project) (int64, error) {
 		if needNarr {
 			desc := "成熟稳重的中年男声旁白，普通话标准，音色低沉有磁性，语速平稳，带一点悬疑感，适合讲故事。"
 			nt := "那一夜之后，一切都变了。没有人知道，真正的秘密才刚刚开始。"
-			names, _, err := designCandidates(ctx, ch, desc, nt, 1)
+			names, durs, err := designCandidates(ctx, ch, desc, nt, 1)
 			var v VoiceSpec
 			if err == nil {
+				saveVoiceCands(p.ID, 0, ch, desc, nt, names, durs, "auto")
 				v, err = designedVoiceSpec(ctx, ch, names[0], "旁白", desc, nt)
 			}
 			if err == nil {

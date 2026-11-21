@@ -864,11 +864,11 @@ var mcpTools = []mcpTool{
 	{"tts", "用角色音色（asset_id）或指定音色合成一句话，返回音频地址。", obj(map[string]any{
 		"text": str("要念的文字"), "emotion": str("语气，如：压低声音、愤怒"), "asset_id": num("角色资产编号"), "voice": map[string]any{"type": "object", "description": "音色：channel_id、mode（fish / builtin / design / clone / openai）、voice、sample、speed、pitch"},
 	}, "text")},
-	{"design_voice", "按文字描述设计角色音色（或旁白音色）：返回 1–4 个候选（样本名 + 试听地址 + MCP 音频内容块，可以直接听），不会改角色的音色。之后也可以用 listen_voice 再听。听完用 set_voice 选定。description 不填就用角色已存的音色描述（upsert_asset 的 voice_description）。有小米 MiMo 渠道用 MiMo，否则用 Fish Audio。", obj(map[string]any{
+	{"design_voice", "按文字描述设计角色音色（或旁白音色）：返回 1–4 个候选（样本名、时长、念的文字、2 小时有效的免密钥下载地址 + MCP 音频内容块），不会改角色的音色。候选按角色存下来，界面音色面板里也能看到、能选。宿主没把音频块交给你时，用下载地址 curl / Invoke-WebRequest 下到工作区再 read_file 听；几个角色一起挑用 export_voice_candidates 打包。之后也可以用 listen_voice / get_audio_link 再取。听完用 set_voice 选定。description 不填就用角色已存的音色描述（upsert_asset 的 voice_description）。有小米 MiMo 渠道用 MiMo，否则用 Fish Audio。", obj(map[string]any{
 		"asset_id": num("角色资产编号（给旁白设计时不填，填 project_id）"), "project_id": num("作品编号（旁白）"), "description": str("音色描述：性别、年龄感、音色质感、语速、性格、口音"),
 		"sample_text": str("试音台词（150 字以内）"), "n": num("候选个数 1–4，默认 3"), "channel_id": num("语音渠道编号（可选）"),
 	})},
-	{"set_voice", "把 design_voice 的一个候选设为角色（或旁白）的音色；用 Fish 时会在 Fish 建一个私有音色。也可以直接给 voice 对象。之后配音都用它。", obj(map[string]any{
+	{"set_voice", "把 design_voice 的一个候选（任何一次设计出来的都行，用原始样本名，不是压缩包里的文件名；channel_id 不填用当初设计它的渠道）设为角色（或旁白）的音色；用 Fish 时会在 Fish 建一个私有音色。也可以直接给 voice 对象。之后配音都用它。", obj(map[string]any{
 		"asset_id": num("角色资产编号"), "project_id": num("作品编号（设旁白时填，且不填 asset_id）"), "sample": str("design_voice 返回的样本名"), "channel_id": num("design_voice 返回的渠道编号"),
 		"description": str("这段音色的描述（记下来以后改用）"), "synth_channel_id": num("配音用哪个渠道（可选）：设计用 MiMo、配音交给 Fish 时填 Fish 渠道编号；只填这个不填 sample = 把已选音色换到这个渠道配音"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
 	})},
@@ -1005,12 +1005,12 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 			"protocolVersion": pv,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "manju-studio", "title": "漫剧工坊", "version": version},
-			"instructions":    "漫剧工坊。外部编剧（如 Antigravity 里的 Gemini）：先调用 get_writing_context，用 view_asset_images 看角色定妆，再用 save_bible / save_synopsis / save_script / upsert_asset / save_shots / save_episode_summary 交回文字，全部用简体中文；一键成集 mode=writer 时写入后自动继续。不要在用户没同意时调用 colab_start（会消耗 Colab 算力单元）。作品是连载剧集（设定集 + 多集，资产库跨集共享）。可以新建一集并一键成集（autopilot_start，异步，用 autopilot_status 轮询，mode=ask 时用 autopilot_continue 确认）、生成配音、合成语音；也能直接管理 Colab 运行时、执行 Python、提交 MiniMax H3 图生视频（video_submit 后用 video_status 轮询）、调用生图渠道。",
+			"instructions":    "漫剧工坊。外部编剧（如 Antigravity 里的 Gemini）：先调用 get_writing_context，用 view_asset_images 看角色定妆，再用 save_bible / save_synopsis / save_script / upsert_asset / save_shots / save_episode_summary 交回文字，全部用简体中文；一键成集 mode=writer 时写入后自动继续。不要在用户没同意时调用 colab_start（会消耗 Colab 算力单元）。返回音频的工具都会在文字里给出每段的文件名、时长、文字和 2 小时有效的免密钥下载地址：宿主没把音频内容块交给你时，下载到工作区再 read_file 听（批量用 export_voice_candidates）。作品是连载剧集（设定集 + 多集，资产库跨集共享）。可以新建一集并一键成集（autopilot_start，异步，用 autopilot_status 轮询，mode=ask 时用 autopilot_continue 确认）、生成配音、合成语音；也能直接管理 Colab 运行时、执行 Python、提交 MiniMax H3 图生视频（video_submit 后用 video_status 轮询）、调用生图渠道。",
 		})
 	case "ping":
 		return ok(map[string]any{})
 	case "tools/list":
-		return ok(map[string]any{"tools": append(append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), vcTools...), mcpTools...)})
+		return ok(map[string]any{"tools": append(append(append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), vcTools...), linkTools...), mcpTools...)})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -1033,6 +1033,9 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 			v, err = callVCTool(ctx, p.Name, p.Arguments, base)
 		}
 		if errors.Is(err, errUnknownTool) {
+			v, err = callLinkTool(ctx, p.Name, p.Arguments, base)
+		}
+		if errors.Is(err, errUnknownTool) {
 			v, err = callTool(ctx, p.Name, p.Arguments, base)
 		}
 		if errors.Is(err, errUnknownTool) {
@@ -1041,6 +1044,7 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 		if err != nil {
 			return ok(map[string]any{"content": []any{map[string]any{"type": "text", "text": err.Error()}}, "isError": true})
 		}
+		v = withAudioLinks(v, base)
 		if rich, isRich := v.(*mcpRich); isRich {
 			res := map[string]any{"content": rich.Blocks}
 			if rich.Structured != nil {
@@ -1256,11 +1260,16 @@ func toolDesignVoice(ctx context.Context, a voiceToolArgs, base string) (any, er
 	if err != nil {
 		return nil, err
 	}
+	saveVoiceCands(pid, a.AssetID, ch, desc, text, names, durs, "mcp")
 	out := []map[string]any{}
 	for i, nm := range names {
-		out = append(out, map[string]any{"sample": nm, "url": base + "/v1/audio/" + nm, "duration": durs[i]})
+		out = append(out, map[string]any{"sample": nm, "url": base + "/v1/audio/" + nm, "download_url": audioDLURL(base, nm), "duration": durs[i], "text": text})
 	}
-	return map[string]any{"channel_id": ch.ID, "channel": ch.APIType, "description": desc, "sample_text": text, "candidates": out}, nil
+	res := map[string]any{"channel_id": ch.ID, "channel": ch.APIType, "description": desc, "sample_text": text, "candidates": out}
+	if a.AssetID > 0 || pid > 0 {
+		res["saved"] = "候选已按角色存下：界面音色面板「设计音色」里能看到、能选；get_audio_link（asset_id, which=candidates）或 export_voice_candidates 可以再取。"
+	}
+	return res, nil
 }
 
 func toolSetVoice(ctx context.Context, a voiceToolArgs) (any, error) {
@@ -1295,10 +1304,28 @@ func toolSetVoice(ctx context.Context, a voiceToolArgs) (any, error) {
 			return nil, errors.New("当前音色不是设计或克隆出来的样本，不能换配音渠道")
 		}
 	} else {
-		if strings.TrimSpace(a.Sample) == "" || strings.ContainsAny(a.Sample, "/\\") {
+		a.Sample = strings.TrimSpace(a.Sample)
+		if a.Sample == "" || strings.ContainsAny(a.Sample, "/\\") {
 			return nil, errors.New("需要 design_voice 返回的 sample")
 		}
-		ch, err := designVoiceChannel(a.ChannelID)
+		if !audioExists(a.Sample) {
+			return nil, fmt.Errorf("样本 %s 不存在（用 design_voice 返回的 sample 原名，不是压缩包里的文件名）", a.Sample)
+		}
+		var oPid, oAid int64
+		if as != nil {
+			oPid, oAid = as.ProjectID, as.ID
+		} else {
+			oPid = p.ID
+		}
+		cand := findVoiceCand(oPid, oAid, a.Sample)
+		chID := a.ChannelID
+		if chID == 0 && cand != nil {
+			chID = cand.ChannelID
+		}
+		ch, err := designVoiceChannel(chID)
+		if err != nil && chID != a.ChannelID {
+			ch, err = designVoiceChannel(a.ChannelID)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1310,15 +1337,21 @@ func toolSetVoice(ctx context.Context, a voiceToolArgs) (any, error) {
 				desc = as.Voice.Desc
 			}
 		}
-		text := ""
-		if t, err := os.ReadFile(filepath.Join(dataDir, "audio", a.Sample+".txt")); err == nil {
-			text = strings.TrimSpace(string(t))
+		text := sampleText(a.Sample)
+		if text == "" && cand != nil {
+			text = cand.Text
+		}
+		if desc == "" && cand != nil {
+			desc = cand.Description
 		}
 		c, cancel := context.WithTimeout(ctx, 4*time.Minute)
 		defer cancel()
 		v, err = designedVoiceSpec(c, ch, a.Sample, title, desc, text)
 		if err != nil {
 			return nil, err
+		}
+		if cand == nil && strings.HasPrefix(a.Sample, "vd-") {
+			saveVoiceCands(oPid, oAid, ch, desc, text, []string{a.Sample}, nil, "mcp")
 		}
 	}
 	if a.SynthCh > 0 && v.Sample != "" {

@@ -54,7 +54,13 @@
 
 ## 音色
 
-- `design_voice` 返回的候选带音频内容块，可以直接听；之后再听用 `listen_voice`（`sample`，或 `asset_id` 听角色当前音色和原声参考）。选定用 `set_voice`。
+- **怎么听音频**：宿主（Antigravity）不一定会把 MCP 音频内容块交给你——如果你只看到「样本 vd-xxx.wav」这样的文字、听不到声音，就是没交过来。所有返回音频的工具（`design_voice`、`listen_voice`、`clone_voice`、`listen_dub`、`get_audio_link`、`set_voice`、`tts`、`list_voice_library` 等）都会在文字里列出每段的文件名、时长、念的文字和一个**下载地址**（`/v1/dl/…`，2 小时内有效，不需要密钥；`/v1/audio/…` 那种地址要密钥，别用）。在终端下载到工作区再 `read_file` 听：
+  - macOS / Linux：`curl -fL -o vd-xxx.wav "<下载地址>"`
+  - Windows PowerShell：`Invoke-WebRequest -Uri "<下载地址>" -OutFile vd-xxx.wav`
+  - 地址过期了就用 `get_audio_link` 重新取（`sample` / `asset_id`（可配 `which`：`sample` / `refs` / `master` / `candidates`）/ `project_id` 旁白 / `library_id` / `line_id`）。
+  - **几个角色一起挑音色**：`export_voice_candidates`（`project_id`，可选 `asset_ids`）一次打包所有角色的设计候选、当前音色、原声参考和母带，返回一个下载地址。压缩包里文件名全是 ASCII（如 `C01_asset10_cand1_vd-xxx.wav`），Windows 用 `Expand-Archive` 解压不乱码；`manifest.txt` / `manifest.json` 写明每个文件对应哪个角色、第几个候选、原始样本名、时长、念的文字、是否当前绑定。
+  - 听不到就不要盲选：拿不到音频时告诉用户，请用户在网页上该角色的音色面板（「设计音色」页的候选列表）里试听挑选。
+- `design_voice` 的候选会按角色存下来，用户在网页音色面板里也能看到、能选；之后再听用 `listen_voice`（`sample`，或 `asset_id` 听角色当前音色、原声参考和全部设计候选）。选定用 `set_voice`（`asset_id` + `sample`，用**原始样本名**，不是压缩包里的文件名；`channel_id` 可不填）。0.2.12 以前设计出来、没出现在网页候选列表里的样本，用 `add_voice_candidates`（`asset_id` + `samples`）补登到对应角色。
 - 用片子里的原声做角色音色：`clone_voice`（`asset_id` + `source_shot_id`，用 `start` / `end` 秒截一段只有这个角色说话的片段，10 秒以上最好）。视频原声里的背景音乐、环境声不会在服务器上去除，先 `listen_voice` 听样本是否干净；不干净就换一段，或处理干净后用 `audio_base64` 传。克隆会直接改角色音色（`bind=false` 只存参考）。
 - 生成后统一音色（视频是 FL2VA 原生出声，跨镜头音色可能不一致时用）：`set_voice_unify`（`project_id` + `on` 作品默认开；或 `shot_id` + `on` / `off` / `inherit` 单镜头）。之后生成的视频会自动在 Colab 上把人声转成说话角色的音色母带，原版保留。已有的视频用 `convert_take_voice`（`shot_id`，可选 `take_id` / `asset_id`）手动做；做完用 `get_video_link`（`version`）下载原版 / 转换版对比，`pick_take_version` 选成片用哪版。母带用 `set_voice_master` 查看 / 指定（默认最长的原声参考，没有就用音色样本），母带不对时先换母带再重做。镜头的 `voice_unify.skip` 会说明为什么跳过（没台词、只有旁白、多人对白、角色没母带）。`convert_take_voice` 只排队，不要传 `start_runtime=true`，除非用户同意开机（会消耗算力单元）。
 - 音色库（跨作品复用）：先 `list_voice_library`（可 `query`、`favorites_only`）看有没有合适的，`listen_voice`（`library_id`）听，合适就 `apply_library_voice`（`library_id` + `asset_id`，旁白用 `project_id`）。好用的音色用 `save_voice_to_library` 收藏：`asset_id`（角色当前音色）、`sample` + `channel_id`（design_voice 候选）、`project_id`（旁白）或 `fish_voice_id`，顺手写 `tags` / `gender` / `age` 方便以后搜；`clone_voice` 可传 `save_to_library=true`。`delete_library_voice` 不可恢复：先不带 `confirm` 调一次告诉用户，同意后再传 `confirm=true`。

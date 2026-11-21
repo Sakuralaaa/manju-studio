@@ -36,6 +36,7 @@ import (
 type mcpRich struct {
 	Blocks     []any
 	Structured any
+	Linked     bool // 已经在文字里写了音频下载地址（不用再兜底补）
 }
 
 func textBlock(s string) map[string]any { return map[string]any{"type": "text", "text": s} }
@@ -1384,6 +1385,16 @@ type dubArgs struct {
 	Limit     int   `json:"limit"`
 }
 
+// sentAll 文字块里是否已经写过这个文件
+func sentAll(blocks []any, file string) bool {
+	for _, b := range blocks {
+		if m, ok := b.(map[string]any); ok && m["type"] == "text" && strings.Contains(m["text"].(string), file) {
+			return true
+		}
+	}
+	return false
+}
+
 func toolListenDub(ctx context.Context, raw json.RawMessage, base string, audioOK bool) (any, error) {
 	var a dubArgs
 	if err := strictArgs(raw, &a); err != nil {
@@ -1413,12 +1424,16 @@ func toolListenDub(ctx context.Context, raw json.RawMessage, base string, audioO
 	for _, l := range ls {
 		it := map[string]any{"line_id": l.ID, "shot_id": l.ShotID, "speaker": l.Speaker, "text": l.Text, "emotion": l.Emotion, "duration": l.Duration, "status": l.Status}
 		items = append(items, it)
+		if l.AudioFile != "" && audioExists(l.AudioFile) {
+			it["audio_file"] = l.AudioFile
+			it["download_url"] = audioDLURL(base, l.AudioFile)
+		}
 		if l.AudioFile == "" || sent >= limit {
 			continue
 		}
 		label := fmt.Sprintf("台词 #%d · %s%s：%s（%.1f 秒）", l.ID, l.Speaker, map[bool]string{true: "（" + l.Emotion + "）", false: ""}[l.Emotion != ""], l.Text, l.Duration)
 		if !audioOK {
-			blocks = append(blocks, textBlock(label+"\n音频："+base+"/v1/audio/"+l.AudioFile))
+			blocks = append(blocks, textBlock(label+"\n"+clipsText([]AudioClip{makeClip(base, l.AudioFile, label, l.Text, l.Duration)})))
 			sent++
 			continue
 		}
@@ -1431,7 +1446,7 @@ func toolListenDub(ctx context.Context, raw json.RawMessage, base string, audioO
 			mime = "audio/mpeg"
 		}
 		total += len(data)
-		blocks = append(blocks, textBlock(label), map[string]any{"type": "audio", "data": base64.StdEncoding.EncodeToString(data), "mimeType": mime})
+		blocks = append(blocks, textBlock(label+"\n文件 "+l.AudioFile+" · 下载（2 小时有效，不需要密钥）："+audioDLURL(base, l.AudioFile)), map[string]any{"type": "audio", "data": base64.StdEncoding.EncodeToString(data), "mimeType": mime})
 		it["included"] = true
 		sent++
 	}
@@ -1441,7 +1456,23 @@ func toolListenDub(ctx context.Context, raw json.RawMessage, base string, audioO
 	} else if sent < len(ls) {
 		head += "要听其余的，按 shot_id 或 line_id 再调用。"
 	}
-	return &mcpRich{Blocks: append([]any{textBlock(head)}, blocks...), Structured: map[string]any{"lines": items}}, nil
+	var rest []AudioClip
+	for i, it := range items {
+		if it["included"] == true || it["audio_file"] == nil {
+			continue
+		}
+		if !audioOK && i < len(ls) && sentAll(blocks, ls[i].AudioFile) {
+			continue
+		}
+		rest = append(rest, makeClip(base, ls[i].AudioFile, fmt.Sprintf("台词 #%d · %s", ls[i].ID, ls[i].Speaker), ls[i].Text, ls[i].Duration))
+	}
+	if len(rest) > 0 {
+		blocks = append(blocks, textBlock("其余台词的配音：\n"+clipsText(rest)))
+	}
+	if sent > 0 {
+		head += "看不到 / 听不到音频块时，用每段后面的下载地址 curl（或 PowerShell Invoke-WebRequest）下到工作区再 read_file；其余台词的地址列在最后，也可用 get_audio_link（line_id）取。"
+	}
+	return &mcpRich{Blocks: append([]any{textBlock(head)}, blocks...), Structured: map[string]any{"lines": items}, Linked: true}, nil
 }
 
 // ---------- 读：视频下载地址（MCP 没有视频内容类型） ----------
@@ -1463,41 +1494,86 @@ func signDL(kind string, id int64, ttl time.Duration) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:18])
 }
 
+// signDLName 限时下载令牌（按文件名）：kind=a（音频样本）/ z（导出的压缩包）
+func signDLName(kind, name string, ttl time.Duration) string {
+	payload := fmt.Sprintf("%s.%d.%s", kind, time.Now().Add(ttl).Unix(), name)
+	m := hmac.New(sha256.New, dlSecret())
+	m.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:18])
+}
+
 func verifyDL(tok string) (string, int64, bool) {
+	k, id, _, ok := verifyDLx(tok)
+	return k, id, ok
+}
+
+// verifyDLx 校验令牌：按编号的（v / vo / vc / f）返回 id，按文件名的（a / z）返回 name
+func verifyDLx(tok string) (string, int64, string, bool) {
 	i := strings.LastIndex(tok, ".")
 	if i < 0 {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	pb, err1 := base64.RawURLEncoding.DecodeString(tok[:i])
 	sig, err2 := base64.RawURLEncoding.DecodeString(tok[i+1:])
 	if err1 != nil || err2 != nil {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	m := hmac.New(sha256.New, dlSecret())
 	m.Write(pb)
 	if !hmac.Equal(sig, m.Sum(nil)[:18]) {
-		return "", 0, false
+		return "", 0, "", false
 	}
-	parts := strings.Split(string(pb), ".")
+	parts := strings.SplitN(string(pb), ".", 3)
 	if len(parts) != 3 {
-		return "", 0, false
+		return "", 0, "", false
+	}
+	if parts[0] == "a" || parts[0] == "z" {
+		exp, _ := strconv.ParseInt(parts[1], 10, 64)
+		if time.Now().Unix() > exp || parts[2] == "" || strings.ContainsAny(parts[2], `/\`) || strings.Contains(parts[2], "..") {
+			return "", 0, "", false
+		}
+		return parts[0], 0, parts[2], true
 	}
 	id, _ := strconv.ParseInt(parts[1], 10, 64)
 	exp, _ := strconv.ParseInt(parts[2], 10, 64)
 	if time.Now().Unix() > exp {
-		return "", 0, false
+		return "", 0, "", false
 	}
-	return parts[0], id, true
+	return parts[0], id, "", true
 }
 
 func handleSignedDL(w http.ResponseWriter, r *http.Request) {
-	kind, id, ok := verifyDL(r.PathValue("token"))
+	kind, id, fname, ok := verifyDLx(r.PathValue("token"))
 	if !ok {
-		httpErr(w, 403, "链接无效或已过期，请重新调用 get_video_link")
+		httpErr(w, 403, "链接无效或已过期，请重新调用 get_video_link / get_audio_link / export_voice_candidates")
 		return
 	}
 	var file string
 	switch kind {
+	case "a":
+		p := filepath.Join(dataDir, "audio", fname)
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			httpErr(w, 404, "音频不存在")
+			return
+		}
+		mime := audioMimes[strings.ToLower(filepath.Ext(fname))]
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Content-Disposition", `attachment; filename="`+asciiName(fname)+`"`)
+		http.ServeFile(w, r, p)
+		return
+	case "z":
+		p := filepath.Join(dataDir, "exports", fname)
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			httpErr(w, 404, "压缩包不存在或已清理，请重新调用 export_voice_candidates")
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+asciiName(fname)+`"`)
+		http.ServeFile(w, r, p)
+		return
 	case "v", "vo", "vc":
 		v, err := getVideo(id)
 		if err != nil || v.File == "" {

@@ -513,7 +513,7 @@ func handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	for _, e := range listEpisodes(id) {
 		removeEpisodeFiles(e)
 	}
-	for _, q := range []string{`DELETE FROM assets WHERE project_id=?`, `DELETE FROM shots WHERE project_id=?`, `DELETE FROM videos WHERE project_id=? AND status<>'running'`,
+	for _, q := range []string{`DELETE FROM assets WHERE project_id=?`, `DELETE FROM voice_cands WHERE project_id=?`, `DELETE FROM shots WHERE project_id=?`, `DELETE FROM videos WHERE project_id=? AND status<>'running'`,
 		`DELETE FROM tasks WHERE project_id=?`, `DELETE FROM lines WHERE project_id=?`, `DELETE FROM pipelines WHERE episode_id IN (SELECT id FROM episodes WHERE project_id=?)`, `DELETE FROM episodes WHERE project_id=?`, `DELETE FROM projects WHERE id=?`} {
 		_, _ = db.Exec(q, id)
 	}

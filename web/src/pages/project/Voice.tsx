@@ -86,7 +86,7 @@ export function VoicePanel({ value, name, assetId, projectId, onApplied, onClose
       <Segmented value={tab} onChange={x => setTab(x as Tab)} options={tabs.map(t => ({ value: t.value, label: t.label }))} />
       <div className="vbody">
         {tab === 'library' && target && <LibraryTab target={target} onApplied={() => onApplied?.()} />}
-        {tab === 'design' && <DesignTab chs={[...mimo, ...fish]} name={name} assetId={assetId} v={v} setV={setV} text={text} setText={setText} />}
+        {tab === 'design' && <DesignTab chs={[...mimo, ...fish]} name={name} assetId={assetId} projectId={projectId} v={v} setV={setV} text={text} setText={setText} />}
         {tab === 'fish' && <FishTab chs={fish} v={v} setV={setV} />}
         {tab === 'clone' && <CloneTab chs={[...mimo, ...fish]} name={name} v={v} setV={setV} />}
         {tab === 'builtin' && <BuiltinTab chs={mimo} v={v} setV={setV} text={text} />}
@@ -121,13 +121,26 @@ function ChannelPick({ chs, value, onChange, label = '语音渠道' }: { chs: Ch
   )
 }
 
-function DesignTab({ chs, name, assetId, v, setV, text, setText }: { chs: Channel[]; name: string; assetId?: number; v: VoiceSpec; setV: (v: VoiceSpec) => void; text: string; setText: (s: string) => void }) {
+type DesignCand = { id?: number; sample: string; url: string; duration: number; channel_id?: number; description?: string; text?: string; source?: string; created_at?: number }
+const candSrc: Record<string, string> = { mcp: '外部智能体', adopt: '外部智能体', auto: '一键设计', web: '' }
+
+function DesignTab({ chs, name, assetId, projectId, v, setV, text, setText }: { chs: Channel[]; name: string; assetId?: number; projectId?: number; v: VoiceSpec; setV: (v: VoiceSpec) => void; text: string; setText: (s: string) => void }) {
   const { toast } = useStore()
   const [ch, setCh] = useState(chs.find(c => c.id === v.channel_id)?.id || chs[0]?.id)
   const [desc, setDesc] = useState(v.mode === 'design' ? v.desc || '' : '')
   const [drafting, setDrafting] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [cands, setCands] = useState<{ sample: string; url: string; duration: number }[]>([])
+  const [cands, setCands] = useState<DesignCand[]>([])
+  const owner = assetId ? `asset_id=${assetId}` : projectId ? `project_id=${projectId}` : ''
+  const loadCands = async () => {
+    if (!owner) return
+    try { const r = await api<{ candidates: DesignCand[] }>(`/api/voice/candidates?${owner}`); setCands(r.candidates) } catch { /* 旧服务器没有这个接口时忽略 */ }
+  }
+  useEffect(() => { loadCands() }, [owner])
+  const removeCand = async (c: DesignCand) => {
+    if (!c.id || !confirm('从候选列表里拿掉这个样本？（不影响已选用的音色）')) return
+    try { await api(`/api/voice/candidates/${c.id}`, { method: 'DELETE' }); setCands(x => x.filter(y => y.id !== c.id)) } catch (e: any) { toast(e.message, 'err') }
+  }
   const draft = async () => {
     if (!assetId) return
     setDrafting(true)
@@ -136,7 +149,11 @@ function DesignTab({ chs, name, assetId, v, setV, text, setText }: { chs: Channe
   useEffect(() => { if (!desc && assetId) draft() }, [])
   const gen = async () => {
     setBusy(true)
-    try { const r = await api<{ candidates: any[]; channel_id: number }>('/api/voice/design', { body: { channel_id: ch, desc, text, n: 3 } }); setCands(r.candidates); setCh(r.channel_id) } catch (e: any) { toast(e.message, 'err') } finally { setBusy(false) }
+    try {
+      const r = await api<{ candidates: DesignCand[]; channel_id: number }>('/api/voice/design', { body: { channel_id: ch, desc, text, n: 3, ...(assetId ? { asset_id: assetId } : projectId ? { project_id: projectId } : {}) } })
+      setCh(r.channel_id)
+      if (owner) await loadCands(); else setCands(r.candidates)
+    } catch (e: any) { toast(e.message, 'err') } finally { setBusy(false) }
   }
   return (
     <div className="stack">
@@ -159,10 +176,20 @@ function DesignTab({ chs, name, assetId, v, setV, text, setText }: { chs: Channe
           )}
           {cands.map((c, i) => {
             const on = v.mode === 'design' && v.sample === c.sample
+            const cch = c.channel_id || ch
+            const src = candSrc[c.source || ''] || ''
+            const pick = () => {
+              const t = c.text || text
+              if (c.text && c.text !== text) setText(c.text)
+              setV({ ...v, channel_id: cch, mode: 'design', sample: c.sample, desc: c.description || desc, voice: '', title: `${name}的声音`, sample_text: t })
+            }
             return (
-              <button key={c.sample} type="button" className={`vcand ${on ? 'is-on' : ''}`} onClick={() => setV({ ...v, channel_id: ch, mode: 'design', sample: c.sample, desc, voice: '', title: `${name}的声音`, sample_text: text })}>
-                <PlayBtn src={c.url} /><span>候选 {i + 1}</span><span className="muted">{c.duration.toFixed(1)} 秒</span><span className="grow" />
-                <span onClick={e => e.stopPropagation()}><LibSaveBtn name={`${name}的声音 · 候选 ${i + 1}`} body={{ sample: c.sample, channel_id: ch, description: desc, ...(assetId ? { asset_id: assetId } : {}) }} /></span>
+              <button key={c.sample} type="button" className={`vcand ${on ? 'is-on' : ''}`} onClick={pick} title={[c.description, c.text && `念：${c.text}`, c.sample].filter(Boolean).join('\n')}>
+                <PlayBtn src={c.url} /><span>候选 {i + 1}</span><span className="muted">{(c.duration || 0).toFixed(1)} 秒</span>
+                {src && <span className="vcand-src">{src}</span>}
+                <span className="grow" />
+                <span onClick={e => e.stopPropagation()}><LibSaveBtn name={`${name}的声音 · 候选 ${i + 1}`} body={{ sample: c.sample, channel_id: cch, description: c.description || desc, ...(assetId ? { asset_id: assetId } : {}) }} /></span>
+                {c.id && !on && <span onClick={e => { e.stopPropagation(); removeCand(c) }} className="icon-btn sm" role="button" aria-label="从候选里拿掉" title="从候选里拿掉"><Trash2 size={14} /></span>}
                 {on ? <Check size={14} /> : <span className="vpick">选用</span>}
               </button>
             )

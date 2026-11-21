@@ -512,6 +512,7 @@ func handleAssetDelete(w http.ResponseWriter, r *http.Request) {
 		deleteImageRow(im)
 	}
 	_, _ = db.Exec(`DELETE FROM assets WHERE id=?`, a.ID)
+	_, _ = db.Exec(`DELETE FROM voice_cands WHERE asset_id=?`, a.ID)
 	_, _ = db.Exec(`UPDATE assets SET base_id=0 WHERE base_id=?`, a.ID)
 	touchProject(a.ProjectID)
 	writeJSON(w, map[string]any{"ok": true})

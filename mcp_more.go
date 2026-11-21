@@ -71,7 +71,7 @@ var moreTools = []mcpTool{
 		"image_id": num("图片编号"), "image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "多张图片编号，最多 8 张"},
 		"original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，256–4096，默认 1536"),
 	})},
-	{"listen_voice", "听音色：返回 MCP 音频内容块。给 sample（design_voice 的候选样本名，可多个）直接听；给 asset_id 听角色当前音色的样本和 clone_voice 存下的原声参考；给 project_id 听旁白音色样本；给 library_id 听音色库里的音色（样本、试听、原声参考）。没有本地样本的音色（Fish 音色 / 内置音色）请用 tts 合成一句试听。", obj(map[string]any{
+	{"listen_voice", "听音色：返回 MCP 音频内容块，并在文字里列出每段的文件名、时长、念的文字和 2 小时有效的免密钥下载地址（宿主不转音频块时下载到工作区再 read_file）。asset_id 时还列出这个角色存下的全部设计候选。给 sample（design_voice 的候选样本名，可多个）直接听；给 asset_id 听角色当前音色的样本和 clone_voice 存下的原声参考；给 project_id 听旁白音色样本；给 library_id 听音色库里的音色（样本、试听、原声参考）。没有本地样本的音色（Fish 音色 / 内置音色）请用 tts 合成一句试听。", obj(map[string]any{
 		"sample": str("样本名"), "samples": arr("多个样本名", map[string]any{"type": "string"}),
 		"asset_id": num("角色资产编号"), "library_id": num("音色库编号（list_voice_library）"), "project_id": num("作品编号（听旁白音色）"), "limit": num("最多几段，1–6，默认 4"),
 	})},
@@ -451,9 +451,16 @@ func withVoiceAudio(v any, base string, audioOK bool) any {
 	}
 	cands, _ := m["candidates"].([]map[string]any)
 	b, _ := json.MarshalIndent(m, "", "  ")
-	blocks := []any{textBlock(string(b) + "\n\n听完用 set_voice（sample + channel_id）选定；以后可用 listen_voice 再听。")}
+	text, _ := m["sample_text"].(string)
+	clips := []AudioClip{}
+	for i, c := range cands {
+		name, _ := c["sample"].(string)
+		d, _ := c["duration"].(float64)
+		clips = append(clips, makeClip(base, name, fmt.Sprintf("候选 %d", i+1), text, d))
+	}
+	blocks := []any{textBlock(string(b) + "\n\n" + clipsText(clips) + "\n\n听完用 set_voice（asset_id + sample，channel_id 可不填）选定；以后可用 listen_voice / get_audio_link 再听。")}
 	if !audioOK {
-		return &mcpRich{Blocks: blocks, Structured: m}
+		return &mcpRich{Blocks: blocks, Structured: m, Linked: true}
 	}
 	total := 0
 	for i, c := range cands {
@@ -463,9 +470,9 @@ func withVoiceAudio(v any, base string, audioOK bool) any {
 			continue
 		}
 		total += n
-		blocks = append(blocks, textBlock(fmt.Sprintf("候选 %d · 样本 %s", i+1, name)), blk)
+		blocks = append(blocks, textBlock(fmt.Sprintf("候选 %d · 样本 %s（%.1f 秒）", i+1, name, clips[i].Duration)), blk)
 	}
-	return &mcpRich{Blocks: blocks, Structured: m}
+	return &mcpRich{Blocks: blocks, Structured: m, Linked: true}
 }
 
 type listenVoiceArgs struct {
@@ -482,12 +489,15 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 	if err := strictArgs(raw, &a); err != nil {
 		return nil, err
 	}
-	type item struct{ name, label string }
+	type item struct {
+		name, label, text string
+		dur               float64
+	}
 	var list []item
 	head := ""
 	for _, s := range append([]string{a.Sample}, a.Samples...) {
 		if s = strings.TrimSpace(s); s != "" {
-			list = append(list, item{s, "样本 " + s})
+			list = append(list, item{name: s, label: "样本 " + s})
 		}
 	}
 	info := map[string]any{}
@@ -501,14 +511,14 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 		info["library"] = libBrief(l, base)
 		info["voice"] = l.Voice
 		if l.Sample != "" {
-			list = append(list, item{l.Sample, "音色样本"})
+			list = append(list, item{name: l.Sample, label: "音色样本", text: l.Voice.SampleText})
 		}
 		if l.Preview != "" {
-			list = append(list, item{l.Preview, "试听"})
+			list = append(list, item{name: l.Preview, label: "试听"})
 		}
 		for _, r := range l.Refs {
 			if r.Sample != l.Sample {
-				list = append(list, item{r.Sample, fmt.Sprintf("原声参考 %.1f 秒", r.Duration)})
+				list = append(list, item{name: r.Sample, label: fmt.Sprintf("原声参考 %.1f 秒", r.Duration), dur: r.Duration})
 			}
 		}
 		if l.Sample == "" && l.Preview == "" {
@@ -522,7 +532,7 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 		head = fmt.Sprintf("%s「%s」的音色", as.Code, as.Name)
 		info["voice"] = as.Voice
 		if as.Voice.Sample != "" {
-			list = append(list, item{as.Voice.Sample, "当前音色样本（" + orDefault(as.Voice.Mode, "?") + "）"})
+			list = append(list, item{name: as.Voice.Sample, label: "当前音色样本（" + orDefault(as.Voice.Mode, "?") + "）", text: as.Voice.SampleText})
 		} else if !as.Voice.empty() {
 			head += "：当前音色没有本地样本（" + as.Voice.Mode + "），用 tts（asset_id）合成一句试听"
 		} else {
@@ -533,13 +543,18 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 			if r.Sample == as.Voice.Sample {
 				continue
 			}
-			l := "原声参考 " + r.Sample
+			l := "原声参考"
 			if r.ShotID > 0 {
 				l += fmt.Sprintf("（镜头 #%d %.1f–%.1f 秒）", r.ShotID, r.Start, r.End)
 			}
-			list = append(list, item{r.Sample, l})
+			list = append(list, item{name: r.Sample, label: l, dur: r.Duration})
 		}
 		info["voice_refs"] = as.VoiceRefs
+		for i, c := range listVoiceCands(as.ProjectID, as.ID) {
+			if c.Sample != as.Voice.Sample {
+				list = append(list, item{name: c.Sample, label: fmt.Sprintf("设计候选 %d", i+1), text: c.Text, dur: c.Duration})
+			}
+		}
 	case a.ProjectID > 0:
 		p, err := getProject(a.ProjectID)
 		if err != nil {
@@ -548,9 +563,14 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 		head = "旁白音色"
 		info["narrator_voice"] = p.NarratorVoice
 		if p.NarratorVoice.Sample != "" {
-			list = append(list, item{p.NarratorVoice.Sample, "旁白音色样本"})
+			list = append(list, item{name: p.NarratorVoice.Sample, label: "旁白音色样本", text: p.NarratorVoice.SampleText})
 		} else {
 			head += "：没有本地样本，用 tts 合成一句试听"
+		}
+		for i, c := range listVoiceCands(p.ID, 0) {
+			if c.Sample != p.NarratorVoice.Sample {
+				list = append(list, item{name: c.Sample, label: fmt.Sprintf("旁白设计候选 %d", i+1), text: c.Text, dur: c.Duration})
+			}
 		}
 	}
 	if len(list) == 0 {
@@ -563,19 +583,29 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 	if a.Limit == 0 {
 		limit = 4
 	}
+	clips := []AudioClip{}
+	seenClip := map[string]bool{}
+	for _, it := range list {
+		if seenClip[it.name] {
+			continue
+		}
+		seenClip[it.name] = true
+		clips = append(clips, makeClip(base, it.name, it.label, it.text, it.dur))
+	}
+	info["clips"] = clips
 	blocks := []any{}
 	if head != "" {
 		blocks = append(blocks, textBlock(head))
 	}
+	blocks = append(blocks, textBlock(clipsText(clips)))
 	total, sent := 0, 0
+	if !audioOK {
+		info["sent"] = 0
+		return &mcpRich{Blocks: blocks, Structured: info, Linked: true}, nil
+	}
 	for _, it := range list {
 		if sent >= limit {
 			break
-		}
-		if !audioOK {
-			blocks = append(blocks, textBlock(it.label+"\n音频："+base+"/v1/audio/"+filepath.Base(it.name)))
-			sent++
-			continue
 		}
 		blk, n, err := audioFileBlock(it.name)
 		if err != nil {
@@ -590,7 +620,10 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 		sent++
 	}
 	info["sent"] = sent
-	return &mcpRich{Blocks: blocks, Structured: info}, nil
+	if sent < len(clips) {
+		blocks = append(blocks, textBlock(fmt.Sprintf("附上了 %d 段音频块；其余的按上面的下载地址听，或用 limit 加大（最多 6）。", sent)))
+	}
+	return &mcpRich{Blocks: blocks, Structured: info, Linked: true}, nil
 }
 
 // ---------- create_project / update_project ----------
@@ -782,6 +815,7 @@ func toolDeleteAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 		_, _ = db.Exec(`UPDATE shots SET asset_codes=? WHERE id=?`, mustJSON(h.codes), h.s.ID)
 	}
 	_, _ = db.Exec(`DELETE FROM assets WHERE id=?`, as.ID)
+	_, _ = db.Exec(`DELETE FROM voice_cands WHERE asset_id=?`, as.ID)
 	_, _ = db.Exec(`UPDATE assets SET base_id=0 WHERE base_id=?`, as.ID)
 	touchProject(as.ProjectID)
 	plan["ok"] = true
@@ -1150,12 +1184,13 @@ func toolCloneVoice(ctx context.Context, raw json.RawMessage, base string, audio
 			out["library_id"], out["library_exists"] = l.ID, exists
 		}
 	}
+	out["download_url"] = audioDLURL(base, name)
 	b, _ := json.MarshalIndent(out, "", "  ")
-	blocks := []any{textBlock(string(b))}
+	blocks := []any{textBlock(string(b) + "\n\n" + clipsText([]AudioClip{makeClip(base, name, "截取的样本", text, dur)}))}
 	if audioOK {
 		if blk, _, err := audioFileBlock(name); err == nil {
 			blocks = append(blocks, textBlock("截取的样本"), blk)
 		}
 	}
-	return &mcpRich{Blocks: blocks, Structured: out}, nil
+	return &mcpRich{Blocks: blocks, Structured: out, Linked: true}, nil
 }

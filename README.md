@@ -165,14 +165,17 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `view_asset_images` | 资产设定图 / 三视图 / 表情表，MCP 图片内容块（默认长边 ≤ 1536 的 JPEG，可要原图） |
 | `view_shot` | 镜头信息 + 关键帧 + 选定视频首尾帧（图片内容块） |
 | `view_image` | 按图片编号看任意图（画室、资产、关键帧、封面），`image_id` 或 `image_ids`（≤ 8），图片内容块 |
-| `listen_dub` | 台词配音，MCP 音频内容块 |
-| `listen_voice` | 听音色：`sample(s)`（design_voice 候选）、`asset_id`（角色当前音色样本 + 原声参考）、`project_id`（旁白）或 `library_id`（音色库），音频内容块 |
+| `listen_dub` | 台词配音，MCP 音频内容块 + 每段的免密钥下载地址（宿主不转音频块时用） |
+| `listen_voice` | 听音色：`sample(s)`（design_voice 候选）、`asset_id`（角色当前音色样本 + 原声参考 + 存下的设计候选）、`project_id`（旁白）或 `library_id`（音色库），音频内容块 + 文字版清单（文件名、时长、文字、免密钥下载地址） |
 | `clone_voice` | 用原声克隆角色音色：`source_shot_id`（镜头选定视频，可配 `video_id`）/ `audio_base64` / `audio_url`，可选 `start` / `end` 秒；Fish 渠道建私有音色，否则走 MiMo voiceclone；样本存进角色 `voice_refs`；`save_to_library=true` 顺手收进音色库。视频原声里的配乐 / 环境声不会去除 |
 | `list_voice_library` | 列出音色库（跨作品收藏的音色）：可选 `query`（名称 / 描述 / 标签 / 性别 / 年龄）、`favorites_only` |
 | `save_voice_to_library` | 收进音色库：`asset_id`（角色当前音色 + 原声参考）/ `sample` + `channel_id`（design_voice 候选、克隆样本）/ `project_id`（旁白）/ `fish_voice_id`；可带 `name`、`description`、`tags`、`gender`、`age`、`favorite`。样本复制进音色库，删作品不受影响；同一段样本不重复收 |
 | `apply_library_voice` | 把音色库的音色用到任意作品的角色（`asset_id`）或旁白（`project_id`）：复制样本、设好音色，音色库里有原声参考时替换角色 `voice_refs` |
 | `delete_library_voice` | 从音色库删除（`library_id`）；必须 `confirm=true`（不传只预览）。已用到角色上的音色不受影响 |
 | `get_video_link` | 视频 / 成片的限时下载地址与建议文件名（MCP 没有视频内容类型，下载到本地看）；`version` = `original` / `converted` 选统一音色前后的版本 |
+| `get_audio_link` | 音频的限时下载地址（2 小时，不需要密钥）+ 文件名、时长、念的文字：`sample(s)` / `asset_id`（`which` = sample / refs / master / candidates）/ `project_id`（旁白）/ `library_id` / `line_id`。宿主不把音频块交给模型时，下载到工作区再听 |
+| `export_voice_candidates` | 把一部作品各角色的设计候选、当前音色、原声参考、母带打成一个 zip（ASCII 文件名 `C01_asset10_cand1_vd-xxx.wav` + `manifest.txt` / `manifest.json`），返回限时下载地址 |
+| `add_voice_candidates` | 把已有样本（如 0.2.12 以前 `design_voice` 出的）登记为某角色 / 旁白的设计候选，网页音色面板能看到 |
 | `convert_take_voice` | 生成后统一音色：`shot_id` + 可选 `take_id`（不填 = 选用的那条）、`asset_id`（不填 = 自动找说话角色）；只排队，视频运行时开着时执行；`start_runtime=true` 才会开机 |
 | `pick_take_version` | `take_id` + `version`（`original` / `converted`）：成片 / 草稿 / 下载用哪一版 |
 | `set_voice_unify` | 作品默认（`project_id` + `on` / `off`）或镜头覆盖（`shot_id` + `inherit` / `on` / `off`） |
@@ -195,7 +198,7 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | `autopilot_cancel` | 停止一键成集 |
 | `generate_dub` | 生成一集的全部配音 |
 | `tts` | 用角色音色（`asset_id`）或指定音色合成一句话 |
-| `design_voice` | 按描述设计音色候选，返回样本名、试听地址和音频内容块 |
+| `design_voice` | 按描述设计音色候选，返回样本名、时长、文字、免密钥下载地址和音频内容块；候选按角色存下，网页音色面板可试听、选用 |
 | `set_voice` | 把候选设为角色 / 旁白音色（可选 `synth_channel_id` 指定配音渠道） |
 | `image_generate` | 用生图渠道出图（放进画室，用 `view_image` 看） |
 | `generate_keyframe` | 给镜头出关键帧；`extra_prompt`（只这一次的追加要求）、`ref_tags`（如 `["main"]` = 只用设定图锁脸，不带三视图、不注入固定造型） |
@@ -231,7 +234,7 @@ aria2 16 线程下载权重（`Comfy-Org/MiniMax-H3`：`minimax_h3_fl2va_pruned_
 | GET | `/v1/audio/{name}` | 下载音频 |
 | POST | `/v1/images` | `{prompt, channel_id, model, aspect, n}` |
 | GET | `/v1/images/{id}/file` | 下载图片 |
-| GET | `/v1/dl/{token}` | `get_video_link` 给出的限时下载地址（令牌即授权，2 小时有效） |
+| GET | `/v1/dl/{token}` | `get_video_link` / `get_audio_link` / `export_voice_candidates` 及各音频工具给出的限时下载地址（令牌即授权，2 小时有效） |
 
 ```bash
 curl -X POST https://你的域名/v1/videos \
