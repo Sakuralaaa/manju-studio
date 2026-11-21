@@ -67,6 +67,29 @@ var opsTools = []mcpTool{
 	{"reorder_shots", "按给定的 shot_ids 顺序重排一集的分镜，所有镜头的关键帧、视频和配音全部保留不脱钩。", obj(map[string]any{
 		"episode_id": num("集编号"), "shot_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "该集全部镜头编号的新顺序（必须恰好包含本集全部镜头）"},
 	}, "episode_id", "shot_ids")},
+	{"preview_shot_prompts", "0 成本预览镜头最终发给生图和视频模型的完整提示词、实际携带及被渠道上限截断的参考图、H3 官方格式视频提示词和统一音色预判；支持单个 shot_id 或整集 episode_id。", obj(map[string]any{
+		"shot_id": num("镜头编号（与 episode_id 二选一）"), "episode_id": num("整集预览（与 shot_id 二选一）"),
+		"channel_id": num("预览用的生图渠道编号（可选，不填用作品设置）"), "model": str("模型名（可选）"),
+		"ref_tags": arr("预览关键帧时的角色图类型，如 [\"main\"]", map[string]any{"type": "string", "enum": []string{"main", "sheet", "expr"}}),
+		"extra_prompt": str("预览时追加的临时关键帧要求（可选）"), "seconds": num("预览视频对齐秒数 5–10（可选）"),
+	})},
+	{"generate_missing_assets", "批量为一整部作品所有缺设定图的资产（以及已有设定图但缺三视图的角色）异步启动出图任务，立即返回 task_ids，再用 get_task_status 轮询。", obj(map[string]any{
+		"project_id": num("作品编号"), "include_sheets": boolp("同时为已有设定图但缺三视图的角色生成三视图，默认 true"),
+		"channel_id": num("生图渠道编号（可选，不填用作品设置）"), "model": str("模型名（可选）"),
+	}, "project_id")},
+	{"list_video_queue", "查看全局或指定一集的视频渲染队列：正在运行、排队中、等待上一镜（waiting_prev）以及最近完成/失败的视频，附预计排队分钟数与待变声数。", obj(map[string]any{
+		"episode_id": num("只看这一集的视频队列（可选，不填看全局队列）"), "limit": num("最多返回条数，默认 40，最多 100"),
+	})},
+	{"list_lines", "列出某一集或某一个镜头的全部配音台词（line_id、说话人、文案、语气、状态、时长、免密钥试听地址）。", obj(map[string]any{
+		"episode_id": num("集编号（与 shot_id 二选一）"), "shot_id": num("镜头编号（与 episode_id 二选一）"),
+	})},
+	{"update_line", "修改单条配音台词的文案或语气（不重做整集配音）；传 regenerate=true 可立即异步重配这一句。", obj(map[string]any{
+		"line_id": num("台词编号（list_lines 获取）"), "text": str("新台词文案（可选）"), "emotion": str("新语气（可选，传空字符串清除语气）"),
+		"regenerate": boolp("改完立即异步重配这一句，默认 false"),
+	}, "line_id")},
+	{"generate_line", "单独重配一条台词的配音音频（适合只重做某一句多音字或语气不满意的台词）。默认异步返回 task_id，传 wait=true 等待完成并返回免密钥试听地址。", obj(map[string]any{
+		"line_id": num("台词编号"), "wait": boolp("是否等配完再返回，默认 false"),
+	}, "line_id")},
 }
 
 func callOpsTool(ctx context.Context, name string, args json.RawMessage, base string) (any, error) {
@@ -97,6 +120,18 @@ func callOpsTool(ctx context.Context, name string, args json.RawMessage, base st
 		return toolDeleteShot(ctx, args)
 	case "reorder_shots":
 		return toolReorderShots(ctx, args)
+	case "preview_shot_prompts":
+		return toolPreviewShotPrompts(ctx, args)
+	case "generate_missing_assets":
+		return toolGenerateMissingAssets(ctx, args)
+	case "list_video_queue":
+		return toolListVideoQueue(ctx, args)
+	case "list_lines":
+		return toolListLines(ctx, args, base)
+	case "update_line":
+		return toolUpdateLine(ctx, args)
+	case "generate_line":
+		return toolGenerateLine(ctx, args, base)
 	}
 	return nil, errUnknownTool
 }
@@ -116,7 +151,7 @@ func toolPickVideo(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, errors.New("这条视频不属于任何镜头")
 	}
 	_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=?`, v.ID, v.ShotID)
-	unlocked := unlockWaitingPrev(v.EpisodeID)
+	unlocked := unlockWaitingPrev(v.EpisodeID, v.ShotID)
 	touchEpisode(v.EpisodeID)
 	return map[string]any{"ok": true, "video_id": v.ID, "shot_id": v.ShotID, "unlocked_waiting_prev": unlocked}, nil
 }
@@ -280,7 +315,9 @@ func resolveAudioInput(ctx context.Context, uploadID, audioURL, audioB64 string)
 		}
 		defName = "网络音频"
 	}
-	tmp, err := os.MkdirTemp(filepath.Join(dataDir, "tmp"), "audin-")
+	tmpDir := filepath.Join(dataDir, "tmp")
+	_ = os.MkdirAll(tmpDir, 0o755)
+	tmp, err := os.MkdirTemp(tmpDir, "audin-")
 	if err != nil {
 		return "", "", cleanup, err
 	}
@@ -551,6 +588,7 @@ func toolAddShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	id, _ := res.LastInsertId()
 	renumberShots(e.ID)
+	unlockWaitingPrev(e.ID)
 	syncLines(p, e)
 	s, _ := getShot(id)
 	return map[string]any{"ok": true, "shot_id": s.ID, "code": s.Code, "episode_id": e.ID, "assets": s.Assets, "chain": s.Chain}, nil
@@ -649,4 +687,333 @@ func toolReorderShots(ctx context.Context, raw json.RawMessage) (any, error) {
 		order = append(order, map[string]any{"shot_id": s.ID, "code": s.Code, "chain": s.Chain})
 	}
 	return map[string]any{"ok": true, "episode_id": e.ID, "shots": order, "unlocked_waiting_prev": unlocked}, nil
+}
+
+func toolPreviewShotPrompts(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		ShotID      int64    `json:"shot_id"`
+		EpisodeID   int64    `json:"episode_id"`
+		ChannelID   int64    `json:"channel_id"`
+		Model       string   `json:"model"`
+		RefTags     []string `json:"ref_tags"`
+		ExtraPrompt string   `json:"extra_prompt"`
+		Seconds     int      `json:"seconds"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	if a.ShotID <= 0 && a.EpisodeID <= 0 {
+		return nil, errors.New("需要 shot_id 或 episode_id")
+	}
+	var p *Project
+	var shots []*Shot
+	if a.ShotID > 0 {
+		s, err := getShot(a.ShotID)
+		if err != nil {
+			return nil, errors.New("镜头不存在")
+		}
+		p, err = getProject(s.ProjectID)
+		if err != nil {
+			return nil, errors.New("作品不存在")
+		}
+		shots = []*Shot{s}
+	} else {
+		var e *Episode
+		var err error
+		p, e, err = epCtx(a.EpisodeID)
+		if err != nil {
+			return nil, err
+		}
+		shots = listShots(e.ID, true)
+	}
+	ch, model, _ := imageChannelFor(p)
+	if ch != nil && (a.ChannelID > 0 || strings.TrimSpace(a.Model) != "") {
+		if ch2, m2, err := applyOverride(ch, model, imgOverride{ChannelID: a.ChannelID, Model: a.Model}); err == nil {
+			ch, model = ch2, m2
+		}
+	}
+	kf := kfOpts{RefTags: a.RefTags, Extra: a.ExtraPrompt}
+	items := make([]map[string]any, 0, len(shots))
+	for _, s := range shots {
+		kp, _, picks := keyframePlan(p, s, ch, kf)
+		sec := a.Seconds
+		if sec == 0 {
+			sec = int(s.Duration + 0.5)
+		}
+		if sec == 0 {
+			sec = p.VideoSec
+		}
+		sec = clampInt(sec, 5, 10)
+		vp := shotVideoPromptFor(p, s, sec, s.Chain == "first")
+		var dropped []string
+		for _, pk := range picks {
+			if !pk.Used {
+				dropped = append(dropped, fmt.Sprintf("%s(%s:%s)", pk.Code, pk.Name, pk.Note))
+			}
+		}
+		var warn []string
+		if len(dropped) > 0 {
+			warn = append(warn, "因渠道参考图上限被截断："+strings.Join(dropped, "、"))
+		}
+		if s.PickedImageID == 0 {
+			warn = append(warn, "尚无关键帧")
+		}
+		items = append(items, map[string]any{
+			"shot_id":              s.ID,
+			"code":                 s.Code,
+			"chain":                s.Chain,
+			"seconds":              sec,
+			"image_model":          model,
+			"max_refs":             refLimit(ch),
+			"keyframe_prompt_final": kp,
+			"refs":                 picks,
+			"video_prompt_final":   vp,
+			"voice_unify":          vcPreview(p, s),
+			"warnings":             nonNil(warn),
+		})
+	}
+	if a.ShotID > 0 && len(items) == 1 {
+		return items[0], nil
+	}
+	return map[string]any{"episode_id": a.EpisodeID, "shots": items}, nil
+}
+
+func toolGenerateMissingAssets(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		ProjectID     int64  `json:"project_id"`
+		IncludeSheets *bool  `json:"include_sheets"`
+		ChannelID     int64  `json:"channel_id"`
+		Model         string `json:"model"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	p, err := getProject(a.ProjectID)
+	if err != nil {
+		return nil, errors.New("作品不存在")
+	}
+	ov := imgOverride{ChannelID: a.ChannelID, Model: a.Model}
+	assetTids, assetSkipped, lastErr := startMissingAssetsDetail(p, ov)
+	var sheetTids []int64
+	sheetSkipped := 0
+	if a.IncludeSheets == nil || *a.IncludeSheets {
+		var sheetErr error
+		sheetTids, sheetSkipped, sheetErr = startMissingSheetsDetail(p, ov)
+		if lastErr == nil && sheetErr != nil {
+			lastErr = sheetErr
+		}
+	}
+	if len(assetTids) == 0 && len(sheetTids) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	if assetTids == nil {
+		assetTids = []int64{}
+	}
+	if sheetTids == nil {
+		sheetTids = []int64{}
+	}
+	allTids := append(append([]int64{}, assetTids...), sheetTids...)
+	return map[string]any{
+		"ok": true, "project_id": p.ID, "started": len(allTids), "task_ids": allTids,
+		"asset_task_ids": assetTids, "sheet_task_ids": sheetTids,
+		"asset_skipped": assetSkipped, "sheet_skipped": sheetSkipped,
+		"note": "已异步启动缺失资产图/三视图任务；用 get_task_status（task_ids）轮询进度。刚新出设定图的角色等设定图完成后可再调一次补三视图。",
+	}, nil
+}
+
+func toolListVideoQueue(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		EpisodeID int64 `json:"episode_id"`
+		Limit     int   `json:"limit"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	lim := a.Limit
+	if lim <= 0 {
+		lim = 40
+	}
+	lim = clampInt(lim, 1, 100)
+	var vs []*Video
+	if a.EpisodeID > 0 {
+		vs = listVideos(`WHERE episode_id=? AND (status IN ('queued','running','waiting_prev') OR finished_at>?) ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'waiting_prev' THEN 2 ELSE 3 END, id DESC LIMIT ?`, a.EpisodeID, now()-24*3600_000, lim)
+	} else {
+		vs = listVideos(`WHERE status IN ('queued','running','waiting_prev') OR finished_at>? ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'waiting_prev' THEN 2 ELSE 3 END, id DESC LIMIT ?`, now()-24*3600_000, lim)
+	}
+	counts := map[string]int{}
+	items := make([]map[string]any, 0, len(vs))
+	for _, v := range vs {
+		counts[v.Status]++
+		it := map[string]any{
+			"video_id": v.ID, "project_id": v.ProjectID, "episode_id": v.EpisodeID, "shot_id": v.ShotID,
+			"status": v.Status, "progress": v.Progress, "stage": v.Stage, "seconds": v.Seconds,
+			"res": v.Res, "turbo": v.Turbo, "created_at": v.CreatedAt, "finished_at": v.FinishedAt,
+		}
+		if v.Position > 0 {
+			it["position"] = v.Position
+		}
+		if v.Error != "" {
+			it["error"] = v.Error
+		}
+		if v.VcStatus != "" {
+			it["vc_status"] = v.VcStatus
+		}
+		items = append(items, it)
+	}
+	cfg := loadColabCfg()
+	var mins float64
+	for _, v := range listVideos(`WHERE status IN ('queued','waiting_prev')`) {
+		per := cfg.ClipMin
+		if v.Turbo {
+			per = cfg.ClipMinTurbo
+		}
+		if v.Post.Upscale {
+			per += cfg.UpscaleMin
+		}
+		if v.Post.Interp {
+			per += cfg.InterpMin
+		}
+		mins += per
+	}
+	return map[string]any{
+		"videos": items, "counts": counts, "queue_minutes": math.Round(mins*10) / 10,
+		"vc_pending": vcPendingCount(), "runner_phase": runner.brief().Phase,
+	}, nil
+}
+
+func toolListLines(ctx context.Context, raw json.RawMessage, base string) (any, error) {
+	var a struct {
+		EpisodeID int64 `json:"episode_id"`
+		ShotID    int64 `json:"shot_id"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	var ls []*Line
+	switch {
+	case a.ShotID > 0:
+		if _, err := getShot(a.ShotID); err != nil {
+			return nil, errors.New("镜头不存在")
+		}
+		ls = listLines(`WHERE shot_id=? ORDER BY sort, id`, a.ShotID)
+	case a.EpisodeID > 0:
+		if _, err := getEpisode(a.EpisodeID); err != nil {
+			return nil, errors.New("这一集不存在")
+		}
+		ls = listLines(`WHERE episode_id=? ORDER BY shot_id, sort, id`, a.EpisodeID)
+	default:
+		return nil, errors.New("需要 episode_id 或 shot_id")
+	}
+	out := make([]map[string]any, 0, len(ls))
+	for _, l := range ls {
+		m := map[string]any{
+			"line_id": l.ID, "shot_id": l.ShotID, "episode_id": l.EpisodeID, "sort": l.Sort,
+			"speaker": l.Speaker, "kind": l.Kind, "text": l.Text, "emotion": l.Emotion,
+			"status": l.Status, "duration": l.Duration,
+		}
+		if l.Error != "" {
+			m["error"] = l.Error
+		}
+		if l.AudioFile != "" {
+			m["audio_file"] = l.AudioFile
+			m["download_url"] = base + "/v1/dl/" + signDLName("a", l.AudioFile, audioLinkTTL)
+		}
+		out = append(out, m)
+	}
+	return map[string]any{"lines": out, "count": len(out)}, nil
+}
+
+func toolUpdateLine(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		LineID     int64   `json:"line_id"`
+		Text       *string `json:"text"`
+		Emotion    *string `json:"emotion"`
+		Regenerate bool    `json:"regenerate"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	l, err := getLine(a.LineID)
+	if err != nil {
+		return nil, errors.New("台词不存在")
+	}
+	if a.Text == nil && a.Emotion == nil {
+		return nil, errors.New("至少提供 text 或 emotion")
+	}
+	if a.Emotion != nil {
+		_, _ = db.Exec(`UPDATE lines SET emotion=? WHERE id=?`, strings.TrimSpace(*a.Emotion), l.ID)
+	}
+	if a.Text != nil {
+		txt := strings.TrimSpace(*a.Text)
+		if txt == "" {
+			return nil, errors.New("text 不能为空")
+		}
+		_, _ = db.Exec(`UPDATE lines SET text=? WHERE id=?`, txt, l.ID)
+	}
+	l, _ = getLine(l.ID)
+	out := map[string]any{"ok": true, "line_id": l.ID, "speaker": l.Speaker, "text": l.Text, "emotion": l.Emotion}
+	if a.Regenerate {
+		p, err := getProject(l.ProjectID)
+		if err != nil {
+			return nil, errors.New("作品不存在")
+		}
+		tid, err := startTaskR(p.ID, l.EpisodeID, "line", "line", l.ID, func(tctx context.Context, tid int64) error {
+			if err := genLine(tctx, p, l); err != nil {
+				return err
+			}
+			if nl, err := getLine(l.ID); err == nil {
+				setTaskResult(tid, map[string]any{"line_id": nl.ID, "audio_file": nl.AudioFile, "duration": nl.Duration})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		out["task_id"] = tid
+		out["status"] = "running"
+	}
+	return out, nil
+}
+
+func toolGenerateLine(ctx context.Context, raw json.RawMessage, base string) (any, error) {
+	var a struct {
+		LineID int64 `json:"line_id"`
+		Wait   bool  `json:"wait"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	l, err := getLine(a.LineID)
+	if err != nil {
+		return nil, errors.New("台词不存在")
+	}
+	p, err := getProject(l.ProjectID)
+	if err != nil {
+		return nil, errors.New("作品不存在")
+	}
+	tid, err := startTaskR(p.ID, l.EpisodeID, "line", "line", l.ID, func(tctx context.Context, tid int64) error {
+		if err := genLine(tctx, p, l); err != nil {
+			return err
+		}
+		if nl, err := getLine(l.ID); err == nil {
+			setTaskResult(tid, map[string]any{"line_id": nl.ID, "audio_file": nl.AudioFile, "duration": nl.Duration})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !a.Wait {
+		return map[string]any{"ok": true, "line_id": l.ID, "task_id": tid, "status": "running", "note": "单句配音已启动；用 get_task_status 查进度，完成后用 get_audio_link（line_id）或 list_lines 试听。"}, nil
+	}
+	if err := waitTask(ctx, tid); err != nil {
+		return nil, err
+	}
+	l, _ = getLine(l.ID)
+	out := map[string]any{"ok": true, "line_id": l.ID, "status": l.Status, "duration": l.Duration}
+	if l.AudioFile != "" {
+		out["audio_file"] = l.AudioFile
+		out["download_url"] = base + "/v1/dl/" + signDLName("a", l.AudioFile, audioLinkTTL)
+	}
+	return out, nil
 }

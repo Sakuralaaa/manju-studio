@@ -103,6 +103,13 @@ description: 漫剧工坊外部编剧规则
 | `get_audio_link` | 音频的限时下载地址（2 小时，不需要密钥）+ 文件名、时长、念的文字：`sample(s)`、`asset_id`（`which` = `sample` / `refs` / `master` / `candidates`，默认全部）、`project_id`（旁白）、`library_id`、`line_id` |
 | `export_voice_candidates` | `project_id`（可选 `asset_ids`）：把各角色的设计候选、当前音色、原声参考、母带（和旁白）打成一个 zip，返回一个限时下载地址；包内文件名全是 ASCII（`C01_asset10_cand1_vd-xxx.wav`），附 `manifest.txt` / `manifest.json`（文件 → 角色、候选序号、原始样本名、时长、文字、是否当前绑定） |
 
+0.2.15：**全流程 Agent 实操卡点全打通**。
+- **镜头关键帧直挂/直传**：`attach_image` 与 `upload_image` 支持传 `shot_id`，画室图或外部精修图可直接设为镜头关键帧并选用。
+- **多抽卡 + 首尾帧防抢跑**：`takes >= 2` 时，上一镜仍有 `queued`/`running` 抽卡未跑完时暂不自动解锁 `waiting_prev`（显式调用 `pick_video` 或全部抽卡跑完后解锁），避免拿未审的第 1 条抽卡抢跑浪费 GPU。
+- **语音渠道与 Prompt 预览**：新增 `list_voice_channels`（不再盲猜语音渠道编号）；新增 0 成本只读工具 `preview_shot_prompts`（出图/出视频前提前检查最终关键帧 Prompt、参考图截断情况与 H3 官方视频 Prompt）。
+- **图片免密钥下载链接**：`/v1/dl/` 新增图片签名类型 `i`，`view_image`、`view_asset_images`、`view_shot` 文字里均附带 2 小时免密钥下载链接（宿主不转图片块时也能下载查看）。
+- **批量资产图、队列查询、单句配音精修与长剧集省上下文**：新增 `generate_missing_assets`、`list_video_queue`、`list_lines`、`update_line`、`generate_line`；`list_shots` 支持 `episode_id` 过滤与 `brief=true` 精简模式；顺手补齐网页排镜自动清理首尾帧、原生字幕极端多句保护与上传大小限制。
+
 0.2.14：**0.2.13 细节修复**：空闲暂缓关机期间云盘状态轮询节流为每 30 秒且关机前跳过已回收运行时；网页端完整适配 `waiting_prev` 显示与取消；`upsert_asset` 局部更新 `look` 时自动保留未传字段与原 `description`；删镜 / 排镜 / 改衔接后自动清理失效 `waiting_prev` 并即时解锁满足条件的镜头；配饰写「无 / 无配饰」不再拼成「戴无」；Colab 状态文件改原子替换写入。
 
 0.2.13：**Agent 全链路闭环、角色一致性、H3 官方提示词与稳定性优化**。

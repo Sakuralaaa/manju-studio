@@ -212,6 +212,30 @@ func copyImageTo(imgID, assetID int64, tag string) (*Image, *Asset, error) {
 	return nim, a, nil
 }
 
+// copyImageToShot 把任意一张图复制为某个镜头的关键帧并设为选用（原图保留）
+func copyImageToShot(imgID, shotID int64) (*Image, *Shot, error) {
+	im, err := getImage(imgID)
+	if err != nil {
+		return nil, nil, errors.New("图片不存在")
+	}
+	s, err := getShot(shotID)
+	if err != nil {
+		return nil, nil, errors.New("镜头不存在")
+	}
+	rf, err := readImageRef(im)
+	if err != nil {
+		return nil, nil, err
+	}
+	nim, err := storeImageX(s.ProjectID, s.EpisodeID, "shot", s.ID, "", rf.Data, im.Source, im.Prompt, im.ChannelID, im.Model)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, nim.ID, s.ID)
+	touchEpisode(s.EpisodeID)
+	s, _ = getShot(s.ID)
+	return nim, s, nil
+}
+
 func handleImageCopy(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		AssetID int64  `json:"asset_id"`

@@ -109,7 +109,7 @@ func callMoreTool(ctx context.Context, name string, args json.RawMessage, base s
 	case "update_shot":
 		return toolUpdateShot(ctx, args)
 	case "view_image":
-		return toolViewImage(ctx, args)
+		return toolViewImage(ctx, args, base)
 	case "listen_voice":
 		return toolListenVoice(ctx, args, base, audioOK)
 	case "design_voice":
@@ -388,7 +388,7 @@ func imageWhere(im *Image) string {
 	return im.OwnerType
 }
 
-func toolViewImage(ctx context.Context, raw json.RawMessage) (any, error) {
+func toolViewImage(ctx context.Context, raw json.RawMessage, base string) (any, error) {
 	var a viewImageArgs
 	if err := strictArgs(raw, &a); err != nil {
 		return nil, err
@@ -417,12 +417,14 @@ func toolViewImage(ctx context.Context, raw json.RawMessage) (any, error) {
 			continue
 		}
 		where := imageWhere(im)
+		dl := imageDLURL(base, im.ID)
 		label := fmt.Sprintf("图片编号 %d · %s（%d×%d）", im.ID, where, im.Width, im.Height)
 		if im.Model != "" {
 			label += " · " + im.Model
 		}
+		label += " · 免密钥下载：" + dl
 		blocks = append(blocks, textBlock(label), blk)
-		items = append(items, map[string]any{"image_id": im.ID, "where": where, "width": im.Width, "height": im.Height, "model": im.Model})
+		items = append(items, map[string]any{"image_id": im.ID, "where": where, "width": im.Width, "height": im.Height, "model": im.Model, "download_url": dl})
 	}
 	if len(items) == 0 {
 		return nil, errors.New("没有找到这些图片")

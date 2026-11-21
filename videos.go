@@ -288,21 +288,41 @@ func queueShot(p *Project, s *Shot, o queueOpts) ([]int64, error) {
 }
 
 // unlockWaitingPrev 上一镜完成、改选、删镜或重排后，检查本集 waiting_prev 的首尾帧视频：
-// 衔接已失效（无镜头 / 已改非首尾帧 / 已成第 1 镜无上一镜）时自动取消，否则补上首帧推入 queued。
-func unlockWaitingPrev(episodeID int64) int {
+// 1. 衔接已失效（无镜头 / 已改非首尾帧 / 已成第 1 镜无上一镜）时自动取消；
+// 2. 多抽卡保护：若上一镜仍有 queued/running 的抽卡未跑完，且未由 forcePickedShotID 显式选片，则暂缓解锁避免拿第 1 条未审抽卡抢跑；
+// 3. 满足条件时补上首帧推入 queued。
+func unlockWaitingPrev(episodeID int64, forcePickedShotID ...int64) int {
 	if episodeID <= 0 {
 		return 0
+	}
+	forceShot := int64(0)
+	if len(forcePickedShotID) > 0 {
+		forceShot = forcePickedShotID[0]
 	}
 	vs := listVideos(`WHERE episode_id=? AND status='waiting_prev' ORDER BY id`, episodeID)
 	unlocked := 0
 	changed := false
 	for _, v := range vs {
 		s, err := getShot(v.ShotID)
-		if err != nil || s.Chain != "first" || prevShot(s) == nil {
+		if err != nil || s.Chain != "first" {
 			_, _ = db.Exec(`UPDATE videos SET status='canceled', stage='', error=?, finished_at=? WHERE id=? AND status='waiting_prev'`,
 				"首尾帧衔接已失效（无上一镜头或已改衔接方式）", now(), v.ID)
 			changed = true
 			continue
+		}
+		pv := prevShot(s)
+		if pv == nil {
+			_, _ = db.Exec(`UPDATE videos SET status='canceled', stage='', error=?, finished_at=? WHERE id=? AND status='waiting_prev'`,
+				"首尾帧衔接已失效（无上一镜头或已改衔接方式）", now(), v.ID)
+			changed = true
+			continue
+		}
+		if forceShot != pv.ID {
+			var inFlight int
+			_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE shot_id=? AND status IN ('queued','running')`, pv.ID).Scan(&inFlight)
+			if inFlight > 0 {
+				continue
+			}
 		}
 		lf, err := ensurePrevLastFrame(s)
 		if err != nil {
@@ -415,7 +435,7 @@ func handleVideoPick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=?`, v.ID, v.ShotID)
-	unlockWaitingPrev(v.EpisodeID)
+	unlockWaitingPrev(v.EpisodeID, v.ShotID)
 	touchEpisode(v.EpisodeID)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -760,12 +780,18 @@ func allocateNativeSubs(texts []parsedLine, dur float64) []tlLine {
 	out := make([]tlLine, 0, len(texts))
 	t := 0.0
 	for i, pl := range texts {
+		if t >= dur {
+			break
+		}
 		d := avail * (weights[i] / totalW)
 		if d < 0.05 {
 			d = 0.05
 		}
 		if t+d > dur {
 			d = dur - t
+		}
+		if d <= 0 {
+			break
 		}
 		out = append(out, tlLine{L: &Line{Text: pl.text, Speaker: pl.speaker}, Start: t, Dur: d})
 		t += d + gap

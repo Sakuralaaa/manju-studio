@@ -1170,7 +1170,7 @@ type viewArgs struct {
 	MaxEdge   int      `json:"max_edge"`
 }
 
-func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
+func toolViewAsset(ctx context.Context, raw json.RawMessage, base string) (any, error) {
 	var a viewArgs
 	if err := strictArgs(raw, &a); err != nil {
 		return nil, err
@@ -1237,7 +1237,8 @@ func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			blocks = append(blocks, textBlock(fmt.Sprintf("%s · %s · 图片编号 %d（%d×%d）", as.Name, labels[w], im.ID, im.Width, im.Height)), blk)
+			dl := imageDLURL(base, im.ID)
+			blocks = append(blocks, textBlock(fmt.Sprintf("%s · %s · 图片编号 %d（%d×%d）· 免密钥下载：%s", as.Name, labels[w], im.ID, im.Width, im.Height, dl)), blk)
 			shown = append(shown, labels[w])
 		}
 	}
@@ -1409,7 +1410,7 @@ func sampleVideoGrid(path string, count, maxEdge int) ([]byte, []float64, error)
 	return jpg, ts, err
 }
 
-func toolViewShot(ctx context.Context, raw json.RawMessage) (any, error) {
+func toolViewShot(ctx context.Context, raw json.RawMessage, base string) (any, error) {
 	var a shotViewArgs
 	if err := strictArgs(raw, &a); err != nil {
 		return nil, err
@@ -1430,8 +1431,11 @@ func toolViewShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	if s.PickedImageID > 0 {
 		blk, im, err := imageBlockByID(s.PickedImageID, a.MaxEdge, a.Original)
 		if err == nil {
-			blocks = append(blocks, textBlock(fmt.Sprintf("关键帧（%d×%d）", im.Width, im.Height)), blk)
+			dl := imageDLURL(base, im.ID)
+			blocks = append(blocks, textBlock(fmt.Sprintf("关键帧 #%d（%d×%d）· 免密钥下载：%s", im.ID, im.Width, im.Height, dl)), blk)
 			info["keyframe"] = true
+			info["keyframe_image_id"] = im.ID
+			info["keyframe_download_url"] = dl
 		}
 	} else {
 		blocks = append(blocks, textBlock("还没有关键帧。"))
@@ -1649,14 +1653,38 @@ func verifyDLx(tok string) (string, int64, string, bool) {
 	return parts[0], id, "", true
 }
 
+// imageDLURL 图片的 2 小时免密钥下载地址（与音频 / 视频同一套 /v1/dl/ 签名）
+func imageDLURL(base string, imgID int64) string {
+	return base + "/v1/dl/" + signDL("i", imgID, audioLinkTTL)
+}
+
 func handleSignedDL(w http.ResponseWriter, r *http.Request) {
 	kind, id, fname, ok := verifyDLx(r.PathValue("token"))
 	if !ok {
-		httpErr(w, 403, "链接无效或已过期，请重新调用 get_video_link / get_audio_link / export_voice_candidates")
+		httpErr(w, 403, "链接无效或已过期，请重新调用 get_video_link / get_audio_link / view_image / export_voice_candidates")
 		return
 	}
 	var file string
 	switch kind {
+	case "i":
+		im, err := getImage(id)
+		if err != nil || im.File == "" {
+			httpErr(w, 404, "图片不存在")
+			return
+		}
+		p := filepath.Join(dataDir, "images", im.File)
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			httpErr(w, 404, "图片文件不存在")
+			return
+		}
+		mt := im.Mime
+		if mt == "" {
+			mt = "image/jpeg"
+		}
+		w.Header().Set("Content-Type", mt)
+		w.Header().Set("Content-Disposition", `inline; filename="`+asciiName(im.File)+`"`)
+		http.ServeFile(w, r, p)
+		return
 	case "a":
 		p := filepath.Join(dataDir, "audio", fname)
 		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
@@ -1907,9 +1935,9 @@ func callWriterTool(ctx context.Context, name string, args json.RawMessage, base
 	case "upsert_asset":
 		return toolUpsertAsset(ctx, args)
 	case "view_asset_images":
-		return toolViewAsset(ctx, args)
+		return toolViewAsset(ctx, args, base)
 	case "view_shot":
-		return toolViewShot(ctx, args)
+		return toolViewShot(ctx, args, base)
 	case "listen_dub":
 		return toolListenDub(ctx, args, base, audioOK)
 	case "get_video_link":

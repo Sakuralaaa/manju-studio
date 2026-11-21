@@ -413,6 +413,8 @@ func TestMCPToolsListUniqueAndOps(t *testing.T) {
 		"queue_episode_videos", "build_final", "generate_cover", "list_bgm", "upload_bgm",
 		"set_episode_audio", "set_shot_sfx", "export_capcut", "add_shot", "delete_shot",
 		"reorder_shots", "set_voice_conv_override",
+		"list_voice_channels", "preview_shot_prompts", "generate_missing_assets",
+		"list_video_queue", "list_lines", "update_line", "generate_line",
 	} {
 		if !seen[want] {
 			t.Fatalf("missing expected MCP tool: %s", want)
@@ -538,5 +540,120 @@ func TestV0214BugFixes(t *testing.T) {
 	v3s := listVideos(`WHERE shot_id=?`, s3)
 	if len(v3s) != 1 || v3s[0].Status != "queued" || v3s[0].ImageFile == "" {
 		t.Fatalf("s3 waiting_prev not unlocked after reorder: %+v", v3s)
+	}
+}
+
+func TestV0215FrictionFixes(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	pr, _ := db.Exec(`INSERT INTO projects(title,style,aspect,takes,created_at,updated_at) VALUES('全流程测','赛博写实','9:16',2,?,?)`, now(), now())
+	pid, _ := pr.LastInsertId()
+	e, _ := insertEpisode(pid, "梗概")
+
+	// 1) list_voice_channels
+	_, _ = db.Exec(`INSERT INTO channels(kind,name,base_url,api_key,api_type,models,voices,caps,sort,created_at) VALUES('voice','MiMo 语音','https://mimo.test','k','mimo','["mimo-tts"]','["v1"]','{}',0,?)`, now())
+	vcRes, err := toolVoiceChannels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	vchs := vcRes.(map[string]any)["channels"].([]map[string]any)
+	if len(vchs) != 1 || vchs[0]["api_type"] != "mimo" {
+		t.Fatalf("unexpected voice channels: %+v", vchs)
+	}
+
+	// 2) attach_image(shot_id) + 图片签名免密钥下载 /v1/dl/i...
+	a1, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"中景","picture":"画面1","dialogue":"阿策：走吧","keyframe_prompt":"画面1详细关键帧描述","video_prompt":"动作1"}`))
+	a2, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":6,"camera":"近景","picture":"画面2","transition":"first_last","keyframe_prompt":"画面2详细关键帧描述","video_prompt":"动作2"}`))
+	s1 := a1.(map[string]any)["shot_id"].(int64)
+	s2 := a2.(map[string]any)["shot_id"].(int64)
+	studioImg, _ := storeImage(0, "ext", 0, makePNGBytes(64, 64, color.RGBA{12, 34, 56, 255}), "upload", "", 0, "")
+	attOut, err := toolAttachImage(context.Background(), attachArgs{ImageID: studioImg.ID, ShotID: s1})
+	if err != nil || attOut.(map[string]any)["shot_id"] != s1 {
+		t.Fatalf("attach_image to shot failed: err=%v out=%+v", err, attOut)
+	}
+	s1Row, _ := getShot(s1)
+	if s1Row.PickedImageID == 0 {
+		t.Fatalf("shot picked_image_id not set after attach_image")
+	}
+	// 验证 /v1/dl/ 图片签名链接可免密钥下载
+	tok := signDL("i", s1Row.PickedImageID, time.Hour)
+	req := httptest.NewRequest("GET", "/v1/dl/"+tok, nil)
+	req.SetPathValue("token", tok)
+	rec := httptest.NewRecorder()
+	handleSignedDL(rec, req)
+	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "image/") {
+		t.Fatalf("signed image download failed: code=%d ct=%s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+
+	// 3) preview_shot_prompts 0 成本预览
+	prevOut, err := toolPreviewShotPrompts(context.Background(), json.RawMessage(`{"shot_id":`+jsonInt(s1)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm := prevOut.(map[string]any)
+	if !strings.Contains(pm["video_prompt_final"].(string), "integrated_multimodal_description:") || pm["keyframe_prompt_final"].(string) == "" {
+		t.Fatalf("preview_shot_prompts missing prompts: %+v", pm)
+	}
+
+	// 4) takes >= 2 多抽卡防抢跑：镜1 Take1 完成但 Take2 仍在排队时，自动 unlockWaitingPrev 不抢跑；显式 pick_video 后立即解锁
+	_, _ = toolAttachImage(context.Background(), attachArgs{ImageID: studioImg.ID, ShotID: s2})
+	if _, err := toolQueueEpisodeVideos(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`}`)); err != nil {
+		t.Fatal(err)
+	}
+	v1s := listVideos(`WHERE shot_id=? ORDER BY id`, s1)
+	if len(v1s) != 2 {
+		t.Fatalf("expected 2 takes for s1, got %d", len(v1s))
+	}
+	_, _ = db.Exec(`UPDATE videos SET status='done', file='t1.mp4' WHERE id=?`, v1s[0].ID)
+	_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=?`, v1s[0].ID, s1)
+	_, _ = storeImageX(pid, e.ID, "lastframe", v1s[0].ID, "", makePNGBytes(32, 32, color.RGBA{70, 70, 70, 255}), "extract", "", 0, "")
+	if n := unlockWaitingPrev(e.ID); n != 0 {
+		t.Fatalf("should NOT unlock waiting_prev while take 2 of prev shot is still queued, unlocked=%d", n)
+	}
+	// 显式选片 pick_video(Take1) -> 立刻解锁镜2
+	pkOut, err := toolPickVideo(context.Background(), json.RawMessage(`{"video_id":`+jsonInt(v1s[0].ID)+`}`))
+	if err != nil || pkOut.(map[string]any)["unlocked_waiting_prev"] != 2 {
+		t.Fatalf("explicit pick_video should unlock both takes of s2, err=%v out=%+v", err, pkOut)
+	}
+
+	// 5) list_video_queue & list_shots(episode_id, brief) & list_lines / update_line
+	qRes, err := toolListVideoQueue(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`}`))
+	if err != nil || len(qRes.(map[string]any)["videos"].([]map[string]any)) == 0 {
+		t.Fatalf("list_video_queue failed: err=%v out=%+v", err, qRes)
+	}
+	lsBrief, err := toolShots(context.Background(), 0, e.ID, true, "http://test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstShot := lsBrief.([]map[string]any)[0]
+	if _, hasDetails := firstShot["take_details"]; hasDetails {
+		t.Fatalf("brief=true should omit take_details")
+	}
+	linesOut, err := toolListLines(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`}`), "http://test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lArr := linesOut.(map[string]any)["lines"].([]map[string]any)
+	if len(lArr) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lArr))
+	}
+	lid := lArr[0]["line_id"].(int64)
+	if _, err := toolUpdateLine(context.Background(), json.RawMessage(`{"line_id":`+jsonInt(lid)+`,"text":"我们走吧","emotion":"低声"}`)); err != nil {
+		t.Fatal(err)
+	}
+	lRow, _ := getLine(lid)
+	if lRow.Text != "我们走吧" || lRow.Emotion != "低声" {
+		t.Fatalf("update_line did not persist: %+v", lRow)
+	}
+
+	// 6) allocateNativeSubs 极端短镜头多句不产生负时长
+	many := make([]parsedLine, 20)
+	for i := range many {
+		many[i] = parsedLine{speaker: "A", text: "你好"}
+	}
+	for _, sl := range allocateNativeSubs(many, 0.4) {
+		if sl.Dur <= 0 || sl.Start < 0 || sl.Start+sl.Dur > 0.4001 {
+			t.Fatalf("invalid native subtitle timing: %+v", sl)
+		}
 	}
 }

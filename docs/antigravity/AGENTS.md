@@ -73,7 +73,8 @@
 - `camera` 写景别 + 机位/运镜（如「近景 · 缓慢推近」）；`picture` 一个镜头只做一件事。
 - `keyframe_prompt`：构图、景别、人物位置与表情、光线，直接用资产名称指代角色和场景。
 - `video_prompt`：只写从关键帧开始的动作、镜头运动、环境动态和声音，不重复静态外观（服务端会自动组装成 MiniMax H3 官方多模态格式：对齐首行 + `integrated_multimodal_description` + `(S1)`/`<d>[Chinese] ...</d>` + `overall_soundscape` + `non_diegetic_music`；若你直接写出含 `integrated_multimodal_description:` 的官方格式会原样透传）。不要在视频描述里堆「不要人声/不要字幕」等否定词。
-- `transition`：`cut` 直接切；`continuous` 同一场景的连续动作；`first_last` 需要严格接上一镜最后一帧时用。
+- `transition`：`cut` 直接切；`continuous` 同一场景的连续动作；`first_last` 需要严格接上一镜最后一帧时用（多抽卡时会等上一镜全部抽卡完成或手动 `pick_video` 后再解锁）。
+- 全流程辅助工具：查语音渠道用 `list_voice_channels`；出图/排视频前用 `preview_shot_prompts`（0 成本）核对最终提示词与参考图截断；画室图或修好的图直挂镜头关键帧用 `attach_image` / `upload_image`（传 `shot_id`）；批量补资产图用 `generate_missing_assets`；查全局视频队列用 `list_video_queue`；配音模式微调单句台词用 `list_lines` / `update_line` / `generate_line`；长剧集查分镜用 `list_shots`（传 `episode_id`、`brief=true`）；`view_image` / `view_asset_images` / `view_shot` 返回图片块的同时也附带 2 小时免密钥下载链接。
 
 ## 不要做的事
 

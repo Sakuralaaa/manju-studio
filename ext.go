@@ -288,14 +288,30 @@ func shotView(s *Shot, base string) map[string]any {
 	return m
 }
 
-func toolShots(ctx context.Context, pid int64, base string) (any, error) {
-	if _, err := getProject(pid); err != nil {
-		return nil, errors.New("作品不存在")
+func toolShots(ctx context.Context, pid, eid int64, brief bool, base string) (any, error) {
+	var eps []*Episode
+	if eid > 0 {
+		e, err := getEpisode(eid)
+		if err != nil {
+			return nil, errors.New("这一集不存在")
+		}
+		eps = []*Episode{e}
+	} else {
+		if _, err := getProject(pid); err != nil {
+			return nil, errors.New("作品不存在")
+		}
+		eps = listEpisodes(pid)
 	}
 	out := []map[string]any{}
-	for _, e := range listEpisodes(pid) {
+	for _, e := range eps {
 		for _, s := range listShots(e.ID, true) {
-			out = append(out, shotView(s, base))
+			m := shotView(s, base)
+			if brief {
+				delete(m, "take_details")
+				delete(m, "take_voice")
+				delete(m, "voice_unify")
+			}
+			out = append(out, m)
 		}
 	}
 	return out, nil
@@ -493,6 +509,22 @@ func toolImageChannels(ctx context.Context) (any, error) {
 	return map[string]any{"channels": out, "note": "image_generate / generate_asset_image 传 channel_id 和 model 指定；不传用第一个渠道（作品资产用作品设置里的渠道）。"}, nil
 }
 
+// toolVoiceChannels 语音渠道和各自的模型 / 内置音色
+func toolVoiceChannels(ctx context.Context) (any, error) {
+	out := []map[string]any{}
+	all, _ := listChannels()
+	for _, ch := range all {
+		if ch.Kind != "voice" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"channel_id": ch.ID, "name": ch.Name, "api_type": ch.APIType,
+			"models": ch.Models, "default_model": firstOr(ch.Models), "voices": ch.Voices,
+		})
+	}
+	return map[string]any{"channels": out, "note": "design_voice / set_voice（含 synth_channel_id）/ clone_voice / update_project（voice_channel_id）可用这里的 channel_id。"}, nil
+}
+
 func firstOr(xs []string) string {
 	if len(xs) > 0 {
 		return xs[0]
@@ -503,10 +535,24 @@ func firstOr(xs []string) string {
 type attachArgs struct {
 	ImageID int64  `json:"image_id"`
 	AssetID int64  `json:"asset_id"`
+	ShotID  int64  `json:"shot_id"`
 	Tag     string `json:"tag"`
 }
 
 func toolAttachImage(ctx context.Context, a attachArgs) (any, error) {
+	if a.AssetID > 0 && a.ShotID > 0 {
+		return nil, errors.New("asset_id 和 shot_id 二选一")
+	}
+	if a.ShotID > 0 {
+		im, s, err := copyImageToShot(a.ImageID, a.ShotID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "image_id": im.ID, "shot_id": s.ID, "code": s.Code, "saved_as": "镜头关键帧（已选用）"}, nil
+	}
+	if a.AssetID <= 0 {
+		return nil, errors.New("需要 asset_id 或 shot_id")
+	}
 	tag := a.Tag
 	if tag == "base" || tag == "picked" {
 		tag = ""
@@ -897,7 +943,9 @@ func extProjects(w http.ResponseWriter, r *http.Request) {
 	extReply(w, v, err)
 }
 func extShots(w http.ResponseWriter, r *http.Request) {
-	v, err := toolShots(r.Context(), pathID(r), baseURL(r))
+	eid, _ := strconv.ParseInt(r.URL.Query().Get("episode_id"), 10, 64)
+	brief := r.URL.Query().Get("brief") == "1" || r.URL.Query().Get("brief") == "true"
+	v, err := toolShots(r.Context(), pathID(r), eid, brief, baseURL(r))
 	extReply(w, v, err)
 }
 func extImageGenerate(w http.ResponseWriter, r *http.Request) {
@@ -1040,7 +1088,10 @@ var mcpTools = []mcpTool{
 	})},
 	{"video_status", "查询视频任务状态；完成后返回下载地址（同一密钥可下载）。", obj(map[string]any{"id": num("视频任务编号")}, "id")},
 	{"list_projects", "列出全部作品（剧集）及每一集还缺哪些步骤。", obj(map[string]any{})},
-	{"list_shots", "列出某个作品全部集的分镜：镜头语言、画面、台词、资产编号、衔接方式、关键帧、选定视频与抽卡候选。", obj(map[string]any{"project_id": num("作品编号")}, "project_id")},
+	{"list_shots", "列出某个作品（或单集）的分镜：镜头语言、画面、台词、资产编号、衔接方式、关键帧、选定视频与抽卡候选。长剧集建议传 episode_id 或 brief=true 省上下文。", obj(map[string]any{
+		"project_id": num("作品编号（与 episode_id 二选一）"), "episode_id": num("只列出这一集的分镜（推荐）"),
+		"brief": boolp("精简模式：省略详细 take_details / voice_unify，省上下文"),
+	})},
 	{"list_episodes", "列出某个作品的设定集（世界观、人物小传、总纲）和各集：梗概、摘要、卡点、缺失步骤、一键成集进度。", obj(map[string]any{"project_id": num("作品编号")}, "project_id")},
 	{"create_episode", "给作品新建下一集。ai_idea=true 时根据设定集、前情摘要和上一集卡点自动拟定本集梗概。", obj(map[string]any{
 		"project_id": num("作品编号"), "idea": str("本集梗概，可留空"), "ai_idea": boolp("自动拟定梗概"),
@@ -1066,6 +1117,7 @@ var mcpTools = []mcpTool{
 		"description": str("这段音色的描述（记下来以后改用）"), "synth_channel_id": num("配音用哪个渠道（可选）：设计用 MiMo、配音交给 Fish 时填 Fish 渠道编号；只填这个不填 sample = 把已选音色换到这个渠道配音"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
 	})},
 	{"list_image_channels", "列出生图渠道：渠道编号、可用模型、参考图上限。指定渠道和模型出图前先看这个。", obj(map[string]any{})},
+	{"list_voice_channels", "列出语音渠道：渠道编号、名称、类型（mimo / fish / openai）、可用模型与内置音色。调用 design_voice / set_voice / clone_voice 前先看这个。", obj(map[string]any{})},
 	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载；返回图片编号，用 view_image 看图。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。传 wait=false 立即返回 task_id，再用 get_task_status 轮询。", obj(map[string]any{
 		"prompt": str("提示词。带参考图时写清每张参考图是谁、参考什么，如「参考图1是同一个人，脸型五官保持一致，只改发型和服装」"), "channel_id": num("渠道编号（list_image_channels），不填用第一个生图渠道"), "model": str("模型名，不填用渠道的第一个模型"),
 		"aspect": str("比例，如 9:16、3:4、1:1、16:9"), "n": num("张数 1–4"),
@@ -1100,13 +1152,15 @@ var mcpTools = []mcpTool{
 	{"pick_image", "把一张图设为选用（定稿）：资产的设定图 / 三视图 / 表情表、镜头的关键帧、封面。后续出图和关键帧都用选用的那张。候选图编号用 view_asset_images / view_shot 看。", obj(map[string]any{
 		"image_id": num("图片编号"),
 	}, "image_id")},
-	{"upload_image", "上传一张图（优先用 POST /v1/uploads 返回的 upload_id，或直接给 base64 / data URL）：不填 asset_id 放进画室；填了就存进资产，tag 同 attach_image（ref = 参考照）。返回图片编号，之后可用于 face_image_ids / ref_image_ids。", obj(map[string]any{
+	{"upload_image", "上传一张图（优先用 POST /v1/uploads 返回的 upload_id，或直接给 base64 / data URL）：都不填放进画室；填 asset_id 存进资产（tag 同 attach_image）；填 shot_id 设为该镜头的关键帧并选用。", obj(map[string]any{
 		"upload_id": str("POST /v1/uploads 返回的临时上传文件编号（推荐，避免大 base64）"), "image": str("base64 或 data URL（与 upload_id 二选一）"),
-		"asset_id": num("目标资产编号，可不填"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
+		"asset_id": num("目标资产编号（与 shot_id 二选一，都不填放进画室）"), "shot_id": num("目标镜头编号（设为该镜头关键帧并选用）"),
+		"tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
 	})},
-	{"attach_image", "把一张图（画室里的、别的资产的都行）复制进某个资产：tag 空 = 设为设定图并选用；sheet / expr = 三视图 / 表情表；ref = 参考照（以后给它出图时用来锁脸或定外形）。", obj(map[string]any{
-		"image_id": num("图片编号"), "asset_id": num("目标资产编号"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
-	}, "image_id", "asset_id")},
+	{"attach_image", "把一张图（画室里的、别的资产或镜头的都行）复制进某个资产或某个镜头：填 asset_id 时 tag 空 = 设定图并选用，sheet / expr = 三视图 / 表情表，ref = 参考照；填 shot_id 时设为该镜头关键帧并选用。", obj(map[string]any{
+		"image_id": num("图片编号"), "asset_id": num("目标资产编号（与 shot_id 二选一）"), "shot_id": num("目标镜头编号（设为该镜头关键帧并选用）"),
+		"tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
+	}, "image_id")},
 }
 
 type rpcReq struct {
@@ -1311,10 +1365,13 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 	case "list_shots":
 		var a struct {
 			ProjectID json.Number `json:"project_id"`
+			EpisodeID json.Number `json:"episode_id"`
+			Brief     bool        `json:"brief"`
 		}
 		_ = json.Unmarshal(args, &a)
-		id, _ := strconv.ParseInt(a.ProjectID.String(), 10, 64)
-		return toolShots(ctx, id, base)
+		pid, _ := strconv.ParseInt(a.ProjectID.String(), 10, 64)
+		eid, _ := strconv.ParseInt(a.EpisodeID.String(), 10, 64)
+		return toolShots(ctx, pid, eid, a.Brief, base)
 	case "list_episodes":
 		var a struct {
 			ProjectID json.Number `json:"project_id"`
@@ -1355,6 +1412,8 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		return toolTTS(ctx, a, base)
 	case "list_image_channels":
 		return toolImageChannels(ctx)
+	case "list_voice_channels":
+		return toolVoiceChannels(ctx)
 	case "pick_image":
 		var a struct {
 			ImageID int64 `json:"image_id"`
@@ -1373,9 +1432,13 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 			UploadID string `json:"upload_id"`
 			Image    string `json:"image"`
 			AssetID  int64  `json:"asset_id"`
+			ShotID   int64  `json:"shot_id"`
 			Tag      string `json:"tag"`
 		}
 		_ = json.Unmarshal(args, &a)
+		if a.AssetID > 0 && a.ShotID > 0 {
+			return nil, errors.New("asset_id 和 shot_id 二选一")
+		}
 		var data []byte
 		var err error
 		if strings.TrimSpace(a.UploadID) != "" {
@@ -1387,6 +1450,19 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		}
 		if err != nil {
 			return nil, err
+		}
+		if a.ShotID > 0 {
+			s, err := getShot(a.ShotID)
+			if err != nil {
+				return nil, errors.New("镜头不存在")
+			}
+			im, err := storeImageX(s.ProjectID, s.EpisodeID, "shot", s.ID, "", data, "upload", "", 0, "")
+			if err != nil {
+				return nil, err
+			}
+			_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im.ID, s.ID)
+			touchEpisode(s.EpisodeID)
+			return map[string]any{"ok": true, "image_id": im.ID, "shot_id": s.ID, "code": s.Code, "saved_as": "镜头关键帧（已选用）"}, nil
 		}
 		im, err := storeImage(0, "ext", 0, data, "upload", "", 0, "")
 		if err != nil {

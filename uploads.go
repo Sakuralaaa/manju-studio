@@ -122,12 +122,18 @@ func readUploadBytes(id string) ([]byte, uploadMeta, error) {
 
 // extUpload POST /v1/uploads：支持 multipart/form-data（字段 file）或直接二进制请求体（可选 X-Filename / Content-Type）
 func extUpload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, uploadMaxBytes+(4<<20))
 	ct := r.Header.Get("Content-Type")
 	var data []byte
 	var filename, fmime string
 	var err error
-	if strings.HasPrefix(ct, "multipart/form-data") {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "multipart/form-data") {
 		if err = r.ParseMultipartForm(uploadMaxBytes); err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				httpErr(w, 413, "上传文件超过 80 MB 限制")
+				return
+			}
 			httpErr(w, 400, "解析上传表单失败")
 			return
 		}

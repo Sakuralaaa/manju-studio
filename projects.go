@@ -895,40 +895,50 @@ func handleAssetGenerate(w http.ResponseWriter, r *http.Request) {
 
 // startMissingAssets 给还没有设定图的资产各生成一张；返回启动数量
 func startMissingAssets(p *Project) (int, error) {
-	n := 0
-	var lastErr error
+	tids, _, err := startMissingAssetsDetail(p, imgOverride{})
+	return len(tids), err
+}
+
+func startMissingAssetsDetail(p *Project, ov imgOverride) (taskIDs []int64, skipped int, lastErr error) {
 	for _, a := range listAssets(p.ID) {
 		if hasTag(a.Images, "") {
+			skipped++
 			continue
 		}
-		if _, err := genAssetTask(p, a, 1, ""); err != nil {
+		tid, err := genAssetTask(p, a, 1, "", ov)
+		if err != nil {
 			if err.Error() != "正在进行中" {
 				lastErr = err
 			}
 			continue
 		}
-		n++
+		taskIDs = append(taskIDs, tid)
 	}
-	return n, lastErr
+	return taskIDs, skipped, lastErr
 }
 
 // startMissingSheets 给已有设定图、还没有三视图的角色各做一张三视图（关键帧锁脸主要靠它）
 func startMissingSheets(p *Project) (int, error) {
-	n := 0
-	var lastErr error
+	tids, _, err := startMissingSheetsDetail(p, imgOverride{})
+	return len(tids), err
+}
+
+func startMissingSheetsDetail(p *Project, ov imgOverride) (taskIDs []int64, skipped int, lastErr error) {
 	for _, a := range listAssets(p.ID) {
 		if a.Kind != "character" || a.PickedImageID == 0 || a.SheetImageID > 0 || hasTag(a.Images, "sheet") {
+			skipped++
 			continue
 		}
-		if _, err := genAssetTask(p, a, 1, "sheet"); err != nil {
+		tid, err := genAssetTask(p, a, 1, "sheet", ov)
+		if err != nil {
 			if err.Error() != "正在进行中" {
 				lastErr = err
 			}
 			continue
 		}
-		n++
+		taskIDs = append(taskIDs, tid)
 	}
-	return n, lastErr
+	return taskIDs, skipped, lastErr
 }
 
 func handleSheetsGenerateAll(w http.ResponseWriter, r *http.Request) {
@@ -1224,10 +1234,12 @@ func handleShotOrder(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	eid := pathID(r)
 	for i, id := range ids {
-		_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=? AND episode_id=?`, i+1, id, pathID(r))
+		_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=? AND episode_id=?`, i+1, id, eid)
 	}
-	touchEpisode(pathID(r))
+	renumberShots(eid)
+	unlockWaitingPrev(eid)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
