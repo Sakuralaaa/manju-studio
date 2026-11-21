@@ -710,10 +710,11 @@ func toolSaveShots(ctx context.Context, raw json.RawMessage) (any, error) {
 	if p.EpisodeSec > 0 && (total < float64(p.EpisodeSec)*0.6 || total > float64(p.EpisodeSec)*1.5) {
 		warn = append(warn, fmt.Sprintf("分镜总时长 %.0f 秒，作品设定单集约 %d 秒", total, p.EpisodeSec))
 	}
-	// 与 splitTask 一致：整集替换镜头和台词
+	// 与 splitTask 一致：整集替换镜头和台词（先清掉旧台词磁盘音频，避免留下孤儿文件）
 	for _, s := range old {
-		_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE shot_id=? AND status='queued'`, now(), s.ID)
+		_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE shot_id=? AND status IN ('queued','waiting_prev')`, now(), s.ID)
 	}
+	cleanLineAudioFiles(`WHERE episode_id=?`, e.ID)
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -785,59 +786,27 @@ func toolSaveSummary(ctx context.Context, raw json.RawMessage) (any, error) {
 
 // ---------- 写：资产 ----------
 
-type lookIn struct {
-	Age         string `json:"age"`
-	Gender      string `json:"gender"`
-	Hair        string `json:"hair"`
-	Face        string `json:"face"`
-	Body        string `json:"body"`
-	Outfit      string `json:"outfit"`
-	Accessories string `json:"accessories"`
-	Palette     string `json:"palette"`
-}
-
 type assetArgs struct {
-	ProjectID        int64   `json:"project_id"`
-	AssetID          int64   `json:"asset_id"`
-	Code             string  `json:"code"`
-	Kind             string  `json:"kind"`
-	Name             string  `json:"name"`
-	Description      string  `json:"description"`
-	Look             *lookIn `json:"look"`
-	Prompt           string  `json:"prompt"`
-	VoiceDescription string  `json:"voice_description"`
-	VoiceSampleText  string  `json:"voice_sample_text"`
-	BaseCode         *string `json:"base_code"`
-	PropsNote        *string `json:"props_note"`
+	ProjectID        int64      `json:"project_id"`
+	AssetID          int64      `json:"asset_id"`
+	Code             string     `json:"code"`
+	Kind             string     `json:"kind"`
+	Name             string     `json:"name"`
+	Description      string     `json:"description"`
+	Look             *AssetLook `json:"look"`
+	Prompt           string     `json:"prompt"`
+	VoiceDescription string     `json:"voice_description"`
+	VoiceSampleText  string     `json:"voice_sample_text"`
+	BaseCode         *string    `json:"base_code"`
+	PropsNote        *string    `json:"props_note"`
 }
 
-// lookDescription 固定造型字段 → 外观描述。每句都带 consistency.go 认得的外貌词（发/眉/身形/穿/戴），
-// 这样 charLook 能把它们原样抽出来写进关键帧、封面、定妆图的提示词。
-func lookDescription(l *lookIn) string {
+// lookDescription 固定造型字段 → 可读的正面外貌描述（只在不传 description 时兜底）
+func lookDescription(l *AssetLook) string {
 	if l == nil {
 		return ""
 	}
-	var s []string
-	if v := strings.TrimSpace(strings.TrimSpace(l.Age) + " " + strings.TrimSpace(l.Gender)); v != "" {
-		s = append(s, v)
-	}
-	add := func(prefix, v string) {
-		v = strings.TrimRight(strings.TrimSpace(v), "。；;")
-		if v != "" {
-			s = append(s, prefix+v)
-		}
-	}
-	add("发型：", l.Hair)
-	add("眉眼五官：", l.Face)
-	add("身形：", l.Body)
-	if o := strings.TrimSpace(l.Outfit); o != "" {
-		add("穿", strings.TrimPrefix(strings.TrimPrefix(o, "穿着"), "穿"))
-	}
-	if ac := strings.TrimSpace(l.Accessories); ac != "" {
-		add("戴", strings.TrimPrefix(strings.TrimPrefix(ac, "佩戴"), "戴"))
-	}
-	add("主色调：", l.Palette)
-	return strings.Join(s, "。")
+	return l.formatPositive()
 }
 
 func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -890,20 +859,19 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("「%s」已经是%s，不能改成别的类型", cur.Name, map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}[cur.Kind])
 	}
 	desc := strings.TrimSpace(a.Description)
-	if ld := lookDescription(a.Look); ld != "" {
-		if a.Look != nil && kind != "character" {
-			return nil, errors.New("look 只用于角色；场景和道具直接写 description")
-		}
-		if desc != "" {
-			desc = strings.TrimRight(desc, "。") + "。" + ld
-		} else {
-			desc = ld
-		}
+	ld := lookDescription(a.Look)
+	if a.Look != nil && kind != "character" {
+		return nil, errors.New("look 只用于角色；场景和道具直接写 description")
 	}
-	if cur == nil && runeLen(desc) < 6 {
-		return nil, errors.New("description 太短：角色写固定外貌（年龄感、发型发色、五官、体型、服装配色），场景写空间、时代、光线、主色调，道具写外形材质")
+	// look 独立存 look_json，不再拼接进 description 造成双写与 320 字截断；
+	// 仅在只传 look 未传 description 时，用格式化外观作为可读 description 兜底。
+	if desc == "" && ld != "" {
+		desc = ld
 	}
-	if kind == "character" && desc != "" && charLookOf(name, desc) == "" {
+	if cur == nil && runeLen(desc) < 6 && ld == "" {
+		return nil, errors.New("description 太短：角色写固定外貌（年龄感、发型发色、五官、体型、服装配色）或用 look，场景写空间、时代、光线、主色调，道具写外形材质")
+	}
+	if kind == "character" && ld == "" && desc != "" && charLookOf(name, desc) == "" {
 		return nil, errors.New("角色外观里没有可固定的造型：至少写清发型和服装（如「黑色齐肩短发」「穿明黄色骑手外套」），或用 look 字段")
 	}
 	created := false
@@ -926,6 +894,10 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 			prompt = strings.TrimSpace(a.Prompt)
 		}
 		_, _ = db.Exec(`UPDATE assets SET name=?, description=?, prompt=? WHERE id=?`, name, desc, prompt, cur.ID)
+		touchProject(p.ID)
+	}
+	if a.Look != nil && kind == "character" {
+		_, _ = db.Exec(`UPDATE assets SET look_json=? WHERE id=?`, mustJSON(a.Look), cur.ID)
 		touchProject(p.ID)
 	}
 	var warn []string
@@ -973,6 +945,9 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	out := map[string]any{"ok": true, "created": created, "asset_id": cur.ID, "code": cur.Code, "kind": cur.Kind, "name": cur.Name,
 		"description": cur.Description, "fixed_look": charLook(p, cur), "props_note": cur.PropsNote, "has_image": cur.PickedImageID > 0, "warnings": nonNil(warn)}
+	if cur.Kind == "character" && cur.Look.hasAnyField() {
+		out["look"] = cur.Look
+	}
 	if cur.BaseID > 0 {
 		if b, err := getAsset(cur.BaseID); err == nil {
 			out["same_person_as"] = b.Code + " " + b.Name
@@ -1012,6 +987,9 @@ func assetBrief(p *Project, a *Asset) map[string]any {
 	}
 	if a.Kind == "character" {
 		m["fixed_look"] = charLook(p, a)
+		if a.Look.hasAnyField() {
+			m["look"] = a.Look
+		}
 		m["has_voice"] = !a.Voice.empty()
 	}
 	if a.PropsNote != "" {
@@ -1282,12 +1260,14 @@ func toolViewAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 }
 
 type shotViewArgs struct {
-	ShotID    int64  `json:"shot_id"`
-	EpisodeID int64  `json:"episode_id"`
-	Code      string `json:"code"`
-	Original  bool   `json:"original"`
-	MaxEdge   int    `json:"max_edge"`
-	Frames    *bool  `json:"video_frames"`
+	ShotID       int64  `json:"shot_id"`
+	EpisodeID    int64  `json:"episode_id"`
+	Code         string `json:"code"`
+	TakeID       int64  `json:"take_id"`
+	Original     bool   `json:"original"`
+	MaxEdge      int    `json:"max_edge"`
+	Frames       *bool  `json:"video_frames"`
+	SampleFrames int    `json:"sample_frames"`
 }
 
 func findShot(shotID, eid int64, code string) (*Shot, error) {
@@ -1324,6 +1304,100 @@ func videoFrame(path string, last bool) ([]byte, error) {
 	return out, nil
 }
 
+func videoFrameAt(path string, sec float64) ([]byte, error) {
+	if sec < 0 {
+		sec = 0
+	}
+	out, err := exec.Command("ffmpeg", "-v", "error", "-ss", fmt.Sprintf("%.3f", sec), "-i", path, "-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1").Output()
+	if err != nil || len(out) < 100 {
+		return nil, errors.New("抽帧失败")
+	}
+	return out, nil
+}
+
+// buildContactSheet 把多张 PNG/JPEG 帧按网格拼成一张 JPEG 抽检拼图
+func buildContactSheet(frames [][]byte, maxEdge int) ([]byte, error) {
+	if len(frames) == 0 {
+		return nil, errors.New("没有可拼接的帧")
+	}
+	imgs := make([]image.Image, 0, len(frames))
+	for _, raw := range frames {
+		im, _, err := image.Decode(bytes.NewReader(raw))
+		if err == nil {
+			imgs = append(imgs, im)
+		}
+	}
+	if len(imgs) == 0 {
+		return nil, errors.New("帧解码失败")
+	}
+	cols := 2
+	if len(imgs) >= 5 {
+		cols = 3
+	}
+	rows := (len(imgs) + cols - 1) / cols
+	b0 := imgs[0].Bounds()
+	sw, sh := max(b0.Dx(), 1), max(b0.Dy(), 1)
+	if maxEdge <= 0 {
+		maxEdge = defaultMaxEdge
+	}
+	maxEdge = clampInt(maxEdge, 512, 4096)
+	gap := 4
+	totalW := cols*sw + (cols-1)*gap
+	totalH := rows*sh + (rows-1)*gap
+	scale := 1.0
+	if totalW > maxEdge || totalH > maxEdge {
+		scale = math.Min(float64(maxEdge)/float64(totalW), float64(maxEdge)/float64(totalH))
+	}
+	cw := max(int(math.Round(float64(sw)*scale)), 32)
+	ch := max(int(math.Round(float64(sh)*scale)), 32)
+	outW := cols*cw + (cols-1)*gap
+	outH := rows*ch + (rows-1)*gap
+	dst := image.NewRGBA(image.Rect(0, 0, outW, outH))
+	for i, im := range imgs {
+		r, c := i/cols, i%cols
+		x0, y0 := c*(cw+gap), r*(ch+gap)
+		xdraw.CatmullRom.Scale(dst, image.Rect(x0, y0, x0+cw, y0+ch), im, im.Bounds(), xdraw.Src, nil)
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func sampleVideoGrid(path string, count, maxEdge int) ([]byte, []float64, error) {
+	count = clampInt(count, 2, 9)
+	ci, err := probe(path)
+	if err != nil || ci.dur <= 0 {
+		return nil, nil, errors.New("无法读取视频时长")
+	}
+	ts := make([]float64, 0, count)
+	frames := make([][]byte, 0, count)
+	endT := math.Max(0, ci.dur-0.15)
+	for i := 0; i < count; i++ {
+		t := 0.0
+		if count > 1 {
+			t = endT * float64(i) / float64(count-1)
+		}
+		var data []byte
+		if i == count-1 {
+			data, err = lastFrame(path)
+		} else {
+			data, err = videoFrameAt(path, t)
+		}
+		if err != nil {
+			continue
+		}
+		ts = append(ts, math.Round(t*100)/100)
+		frames = append(frames, data)
+	}
+	if len(frames) == 0 {
+		return nil, nil, errors.New("抽帧失败")
+	}
+	jpg, err := buildContactSheet(frames, maxEdge)
+	return jpg, ts, err
+}
+
 func toolViewShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a shotViewArgs
 	if err := strictArgs(raw, &a); err != nil {
@@ -1351,23 +1425,45 @@ func toolViewShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	} else {
 		blocks = append(blocks, textBlock("还没有关键帧。"))
 	}
-	if v := shotVideoFor(s); v != nil {
+	var v *Video
+	if a.TakeID > 0 {
+		x, err := getVideo(a.TakeID)
+		if err != nil || x.ShotID != s.ID || x.Status != "done" || x.File == "" {
+			return nil, errors.New("指定的 take_id 不存在、不属于该镜头或尚未完成")
+		}
+		v = x
+	} else {
+		v = shotVideoFor(s)
+	}
+	if v != nil {
 		info["video_id"] = v.ID
 		if a.Frames == nil || *a.Frames {
-			path := filepath.Join(dataDir, "videos", v.File)
-			for _, last := range []bool{false, true} {
-				data, err := videoFrame(path, last)
-				if err != nil {
-					continue
+			path := filepath.Join(dataDir, "videos", v.useFile())
+			if a.SampleFrames >= 2 {
+				if jpg, ts, err := sampleVideoGrid(path, a.SampleFrames, a.MaxEdge); err == nil {
+					var tStr []string
+					for _, t := range ts {
+						tStr = append(tStr, fmt.Sprintf("%.2fs", t))
+					}
+					blocks = append(blocks, textBlock(fmt.Sprintf("视频 #%d 抽帧拼图（%d 帧，从左到右、从上到下：%s）", v.ID, len(ts), strings.Join(tStr, " / "))),
+						map[string]any{"type": "image", "data": base64.StdEncoding.EncodeToString(jpg), "mimeType": "image/jpeg"})
+					info["sample_timestamps"] = ts
 				}
-				blk, err := imageBlock(data, "image/png", a.MaxEdge, a.Original)
-				if err != nil {
-					continue
+			} else {
+				for _, last := range []bool{false, true} {
+					data, err := videoFrame(path, last)
+					if err != nil {
+						continue
+					}
+					blk, err := imageBlock(data, "image/png", a.MaxEdge, a.Original)
+					if err != nil {
+						continue
+					}
+					blocks = append(blocks, textBlock(map[bool]string{false: fmt.Sprintf("视频 #%d 第一帧", v.ID), true: fmt.Sprintf("视频 #%d 最后一帧", v.ID)}[last]), blk)
 				}
-				blocks = append(blocks, textBlock(map[bool]string{false: fmt.Sprintf("选定视频 #%d 第一帧", v.ID), true: fmt.Sprintf("选定视频 #%d 最后一帧", v.ID)}[last]), blk)
 			}
 		}
-		blocks = append(blocks, textBlock("要看完整视频：调用 get_video_link（shot_id）拿下载地址，下载到工作区再看。"))
+		blocks = append(blocks, textBlock("要看完整视频：调用 get_video_link（shot_id 或 video_id）拿下载地址，下载到工作区再看。"))
 	} else {
 		blocks = append(blocks, textBlock("还没有选定的视频。"))
 	}
@@ -1753,8 +1849,9 @@ var writerTools = []mcpTool{
 		"kind": map[string]any{"type": "string", "enum": []string{"character", "scene", "prop"}}, "name": str("名称"),
 		"description": str("外观描述（场景：空间、时代、光线、主色调；道具：外形材质）"),
 		"look": obj(map[string]any{
-			"age": str("年龄感"), "gender": str("性别"), "hair": str("发型发色"), "face": str("眉眼五官、标志特征"), "body": str("体型身形"),
-			"outfit": str("服装与配色（固定不变的那套）"), "accessories": str("佩戴在身上的配饰（耳钉、项链、眼镜）；不要写手里拿的东西"), "palette": str("主色调"),
+			"age": str("年龄感"), "gender": str("性别"), "hair": str("发型发色（正面描述，不要写「不戴帽子」）"), "face": str("眉眼五官、标志特征"), "body": str("体型身形"),
+			"outfit": str("服装与配色（固定不变的那套）"), "accessories": str("佩戴在身上的配饰（耳钉、项链、眼镜）；不要写手里拿的东西和否定句"), "palette": str("主色调"),
+			"avoid": map[string]any{"description": "该角色要避免出现的元素（如帽子、手持物），字符串或字符串数组；单独保存备忘，不会注入生图提示词", "oneOf": []any{map[string]any{"type": "string"}, arr("", map[string]any{"type": "string"})}},
 		}),
 		"prompt":            str("生图提示词（可选，单独描述这个资产本身）"),
 		"voice_description": str("音色描述（可选，角色）：年龄感、音色质感、语速、口音"),
@@ -1767,9 +1864,11 @@ var writerTools = []mcpTool{
 		"which":    arr("要看哪些，默认选用的设定图、三视图、表情表和参考照；candidates = 没选用的候选图（最多 8 张）", map[string]any{"type": "string", "enum": []string{"main", "sheet", "expressions", "refs", "candidates"}}),
 		"original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，256–4096，默认 1536"),
 	})},
-	{"view_shot", "看一个镜头：文字信息 + 关键帧图片 + 选定视频的第一帧和最后一帧（图片内容块）。完整视频用 get_video_link。", obj(map[string]any{
+	{"view_shot", "看一个镜头：文字信息 + 关键帧图片 + 视频抽帧（默认首尾帧；传 sample_frames=4..9 返回均匀抽帧拼图，传 take_id 可看任意一条抽卡视频）。完整视频用 get_video_link。", obj(map[string]any{
 		"shot_id": num("镜头编号"), "episode_id": num("集编号（与 code 一起用）"), "code": str("镜头序号，如 03"),
-		"video_frames": boolp("是否附视频首尾帧，默认是"), "original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，默认 1536"),
+		"take_id": num("指定查看某条已完成视频候选（可选，不填用镜头选定的视频）"),
+		"sample_frames": num("均匀抽帧拼图张数 2–9（可选，如 4 或 6，省 token 一次检查整段动作与穿模）"),
+		"video_frames": boolp("是否附视频帧，默认是"), "original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，默认 1536"),
 	})},
 	{"listen_dub", "听台词配音：返回音频内容块（audio/mpeg 等，按 MCP 规范 base64）。按 line_id、shot_id 或 episode_id 取，每次最多 8 段。", obj(map[string]any{
 		"episode_id": num("集编号"), "shot_id": num("镜头编号"), "line_id": num("台词编号"), "limit": num("最多返回几段音频，1–8，默认 4"),

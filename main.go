@@ -21,7 +21,7 @@ import (
 var webFS embed.FS
 
 var (
-	version   = "0.2.12"
+	version   = "0.2.13"
 	dataDir   string
 	adminPass string
 	secret    []byte
@@ -239,6 +239,9 @@ func routes(m *http.ServeMux) {
 	k("POST /v1/tts", extTTS)
 	k("GET /v1/audio/{name}", extAudioFile)
 	k("GET /v1/images/{id}/file", extImageFile)
+	k("POST /v1/uploads", extUpload)
+	k("GET /v1/tasks/{id}", handleTaskGet)
+	k("POST /v1/episodes/{id}/keyframes", extKeyframesMissing)
 	k("POST /mcp", handleMCP)
 	m.HandleFunc("GET /v1/dl/{token}", handleSignedDL) // 限时下载链接（令牌即授权），给外部编剧下载视频
 	m.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {

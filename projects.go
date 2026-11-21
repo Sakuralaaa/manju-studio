@@ -31,21 +31,25 @@ type Asset struct {
 	PropsNote     string     `json:"props_note"` // 常带道具 / 习惯动作的备注：只给编剧看，不注入出图提示词
 	VoiceRefs     []VoiceRef `json:"voice_refs"` // 克隆用的原声样本（clone_voice），以后也可做声音转换的参考
 	VcMaster      string     `json:"vc_master"`  // 统一音色用的母带（样本名）；空 = 自动（最长的原声参考，否则音色样本）
+	Look          AssetLook  `json:"look"`       // 结构化固定造型（含 avoid），优先于从 description 反抽
+	VcOverride    VCOverride `json:"vc_override"`
 	Sort          int        `json:"sort"`
 	Images        []*Image   `json:"images"`
 	Appear        int        `json:"appear"`
 }
 
-const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id,props_note,voice_refs,vc_master`
+const assetCols = `id,project_id,kind,code,name,description,prompt,picked_image_id,sheet_image_id,expr_image_id,voice,sort,base_id,props_note,voice_refs,vc_master,look_json,vc_override`
 
 func scanAsset(sc interface{ Scan(...any) error }) (*Asset, error) {
 	var a Asset
-	var voice, vrefs string
-	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID, &a.PropsNote, &vrefs, &a.VcMaster); err != nil {
+	var voice, vrefs, lookJS, vcOv string
+	if err := sc.Scan(&a.ID, &a.ProjectID, &a.Kind, &a.Code, &a.Name, &a.Description, &a.Prompt, &a.PickedImageID, &a.SheetImageID, &a.ExprImageID, &voice, &a.Sort, &a.BaseID, &a.PropsNote, &vrefs, &a.VcMaster, &lookJS, &vcOv); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(voice), &a.Voice)
 	_ = json.Unmarshal([]byte(vrefs), &a.VoiceRefs)
+	_ = json.Unmarshal([]byte(lookJS), &a.Look)
+	_ = json.Unmarshal([]byte(vcOv), &a.VcOverride)
 	if a.VoiceRefs == nil {
 		a.VoiceRefs = []VoiceRef{}
 	}
@@ -688,7 +692,7 @@ func genAssetTask(p *Project, a *Asset, n int, tag string, ov ...imgOverride) (i
 	if tag != "" {
 		kind = "image-" + tag
 	}
-	return startTask(p.ID, 0, kind, "asset", a.ID, func(ctx context.Context) error {
+	return startTaskR(p.ID, 0, kind, "asset", a.ID, func(ctx context.Context, tid int64) error {
 		waitBaseImage(ctx, a)
 		if x, err := getAsset(a.ID); err == nil {
 			a = x
@@ -730,10 +734,14 @@ func genAssetTask(p *Project, a *Asset, n int, tag string, ov ...imgOverride) (i
 			return err
 		}
 		var first int64
+		var ids []int64
 		for _, data := range imgs {
 			im, err := storeImageX(p.ID, 0, "asset", a.ID, tag, data, "gen", sent, ch.ID, model)
-			if err == nil && first == 0 {
-				first = im.ID
+			if err == nil {
+				ids = append(ids, im.ID)
+				if first == 0 {
+					first = im.ID
+				}
 			}
 		}
 		if first == 0 {
@@ -741,6 +749,7 @@ func genAssetTask(p *Project, a *Asset, n int, tag string, ov ...imgOverride) (i
 		}
 		col := map[string]string{"": "picked_image_id", "sheet": "sheet_image_id", "expr": "expr_image_id"}[tag]
 		_, _ = db.Exec(`UPDATE assets SET `+col+`=? WHERE id=? AND `+col+`=0`, first, a.ID)
+		setTaskResult(tid, map[string]any{"asset_id": a.ID, "tag": tag, "image_ids": ids})
 		return nil
 	})
 }
@@ -1055,6 +1064,7 @@ func splitTask(p *Project, e *Episode) (int64, error) {
 		for _, a := range assets {
 			valid[a.Code] = true
 		}
+		cleanLineAudioFiles(`WHERE episode_id=?`, e.ID)
 		tx, err := db.Begin()
 		if err != nil {
 			return err
@@ -1192,7 +1202,8 @@ func handleShotDelete(w http.ResponseWriter, r *http.Request) {
 	for _, im := range listImages(`WHERE owner_type='shot' AND owner_id=?`, s.ID) {
 		deleteImageRow(im)
 	}
-	_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE shot_id=? AND status='queued'`, now(), s.ID)
+	cleanLineAudioFiles(`WHERE shot_id=?`, s.ID)
+	_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE shot_id=? AND status IN ('queued','waiting_prev')`, now(), s.ID)
 	_, _ = db.Exec(`DELETE FROM lines WHERE shot_id=?`, s.ID)
 	_, _ = db.Exec(`DELETE FROM shots WHERE id=?`, s.ID)
 	renumberShots(s.EpisodeID)
@@ -1421,23 +1432,28 @@ func genKeyframeTask(p *Project, s *Shot, n int, ov ...imgOverride) (int64, erro
 	}
 	prompt, refs, _ := keyframePlan(p, s, ch, kf)
 	params := paramsFor(ch, p.Aspect, n)
-	return startTask(p.ID, s.EpisodeID, "image", "shot", s.ID, func(ctx context.Context) error {
+	return startTaskR(p.ID, s.EpisodeID, "image", "shot", s.ID, func(ctx context.Context, tid int64) error {
 		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
 		ledgerAdd(p.ID, s.EpisodeID, "image", len(imgs), 0, 0, 0, "")
 		if err != nil {
 			return err
 		}
 		var first int64
+		var ids []int64
 		for _, data := range imgs {
 			im, err := storeImageX(p.ID, s.EpisodeID, "shot", s.ID, "", data, "gen", sent, ch.ID, model)
-			if err == nil && first == 0 {
-				first = im.ID
+			if err == nil {
+				ids = append(ids, im.ID)
+				if first == 0 {
+					first = im.ID
+				}
 			}
 		}
 		if first == 0 {
 			return errors.New("图片保存失败")
 		}
 		_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=? AND picked_image_id=0`, first, s.ID)
+		setTaskResult(tid, map[string]any{"shot_id": s.ID, "image_ids": ids})
 		return nil
 	})
 }
@@ -1520,21 +1536,26 @@ func handleShotRefs(w http.ResponseWriter, r *http.Request) {
 }
 
 func startMissingKeyframes(p *Project, e *Episode) (int, error) {
-	n := 0
-	var lastErr error
+	tids, _, err := startMissingKeyframesDetail(p, e, imgOverride{})
+	return len(tids), err
+}
+
+func startMissingKeyframesDetail(p *Project, e *Episode, ov imgOverride) (taskIDs []int64, skipped int, lastErr error) {
 	for _, s := range listShots(e.ID, true) {
 		if len(s.Images) > 0 {
+			skipped++
 			continue
 		}
-		if _, err := genKeyframeTask(p, s, 1); err != nil {
+		tid, err := genKeyframeTask(p, s, 1, ov)
+		if err != nil {
 			if err.Error() != "正在进行中" {
 				lastErr = err
 			}
 			continue
 		}
-		n++
+		taskIDs = append(taskIDs, tid)
 	}
-	return n, lastErr
+	return taskIDs, skipped, lastErr
 }
 
 func handleKeyframesGenerateAll(w http.ResponseWriter, r *http.Request) {

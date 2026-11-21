@@ -51,6 +51,22 @@ func handleBgmList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, listBgm(`ORDER BY id DESC`))
 }
 
+// storeAudioFromPath 把本地音频文件统一转成 mp3（44.1 kHz 立体声）落盘到 data/audio/
+func storeAudioFromPath(in, prefix string, maxSec int) (string, float64, error) {
+	name := fmt.Sprintf("%s-%d-%s.mp3", prefix, now()/1000, randHex(4))
+	dst := filepath.Join(dataDir, "audio", name)
+	args := []string{"-i", in, "-vn"}
+	if maxSec > 0 {
+		args = append(args, "-t", fmt.Sprint(maxSec))
+	}
+	args = append(args, "-ac", "2", "-ar", "44100", "-b:a", "192k", dst)
+	if err := runFF(context.Background(), "音频转换", args...); err != nil {
+		return "", 0, errors.New("无法识别的音频文件")
+	}
+	ci, _ := probe(dst)
+	return name, ci.dur, nil
+}
+
 // storeAudioUpload 上传的音频统一转成 mp3（44.1 kHz 立体声）
 func storeAudioUpload(r *http.Request, prefix string, maxSec int) (string, float64, string, error) {
 	if err := r.ParseMultipartForm(120 << 20); err != nil {
@@ -70,19 +86,12 @@ func storeAudioUpload(r *http.Request, prefix string, maxSec int) (string, float
 	out, _ := os.Create(in)
 	_, _ = out.ReadFrom(f)
 	out.Close()
-	name := fmt.Sprintf("%s-%d-%s.mp3", prefix, now()/1000, randHex(4))
-	dst := filepath.Join(dataDir, "audio", name)
-	args := []string{"-i", in, "-vn"}
-	if maxSec > 0 {
-		args = append(args, "-t", fmt.Sprint(maxSec))
+	name, dur, err := storeAudioFromPath(in, prefix, maxSec)
+	if err != nil {
+		return "", 0, "", err
 	}
-	args = append(args, "-ac", "2", "-ar", "44100", "-b:a", "192k", dst)
-	if err := runFF(context.Background(), "音频转换", args...); err != nil {
-		return "", 0, "", errors.New("无法识别的音频文件")
-	}
-	ci, _ := probe(dst)
 	base := strings.TrimSuffix(fh.Filename, filepath.Ext(fh.Filename))
-	return name, ci.dur, base, nil
+	return name, dur, base, nil
 }
 
 func handleBgmUpload(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +230,7 @@ func coverTask(p *Project, e *Episode, title string) (int64, error) {
 		prompt += strings.Join(who, "，") + "；人物的脸、发型、服装与参考图完全一致。"
 	}
 	params := paramsFor(ch, p.Aspect, 1)
-	return startTask(p.ID, e.ID, "cover", "episode", e.ID, func(ctx context.Context) error {
+	return startTaskR(p.ID, e.ID, "cover", "episode", e.ID, func(ctx context.Context, tid int64) error {
 		imgs, sent, err := generateImages(ctx, ch, model, prompt, params, refs)
 		ledgerAdd(p.ID, e.ID, "image", len(imgs), 0, 0, 0, "")
 		if err != nil {
@@ -237,6 +246,7 @@ func coverTask(p *Project, e *Episode, title string) (int64, error) {
 			return errors.New("图片保存失败")
 		}
 		_, _ = db.Exec(`UPDATE episodes SET cover_image_id=? WHERE id=?`, first, e.ID)
+		setTaskResult(tid, map[string]any{"episode_id": e.ID, "cover_image_id": first})
 		return nil
 	})
 }

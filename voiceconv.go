@@ -47,6 +47,38 @@ type VCCfg struct {
 	Repo           string  `json:"repo"`            // Seed-VC 仓库
 }
 
+// VCOverride 按角色或单次转换覆盖全局变声参数（只覆盖非 nil 字段）
+type VCOverride struct {
+	DiffusionSteps *int     `json:"diffusion_steps,omitempty"`
+	CfgRate        *float64 `json:"cfg_rate,omitempty"`
+	F0             *bool    `json:"f0,omitempty"`
+	AutoF0         *bool    `json:"auto_f0,omitempty"`
+	SemiTone       *int     `json:"semi_tone,omitempty"`
+}
+
+func (o VCOverride) empty() bool {
+	return o.DiffusionSteps == nil && o.CfgRate == nil && o.F0 == nil && o.AutoF0 == nil && o.SemiTone == nil
+}
+
+func (c VCCfg) applyOverride(o VCOverride) VCCfg {
+	if o.DiffusionSteps != nil {
+		c.DiffusionSteps = *o.DiffusionSteps
+	}
+	if o.CfgRate != nil {
+		c.CfgRate = *o.CfgRate
+	}
+	if o.F0 != nil {
+		c.F0 = *o.F0
+	}
+	if o.AutoF0 != nil {
+		c.AutoF0 = *o.AutoF0
+	}
+	if o.SemiTone != nil {
+		c.SemiTone = *o.SemiTone
+	}
+	return c.norm()
+}
+
 func defaultVCCfg() VCCfg {
 	return VCCfg{DiffusionSteps: 30, CfgRate: 0.7, F0: false, AutoF0: true, LengthAdjust: 1.0, SeparateMaster: true, MaxMasterSec: 25, VocalGain: 1.0, AutoUse: true, Repo: "https://github.com/Plachtaa/seed-vc"}
 }
@@ -262,6 +294,9 @@ func masterView(a *Asset) map[string]any {
 		m["current"] = c
 		m["how"] = how
 	}
+	if !a.VcOverride.empty() {
+		m["vc_override"] = a.VcOverride
+	}
 	return m
 }
 
@@ -421,7 +456,7 @@ func vcView(v *Video, base string) map[string]any {
 }
 
 // queueVC 给一条已完成的视频排队统一音色（手动重做也走这里）。assetID=0 时自动找说话角色。
-func queueVC(v *Video, assetID int64) error {
+func queueVC(v *Video, assetID int64, ov ...VCOverride) error {
 	if v.Status != "done" || v.File == "" {
 		return errors.New("视频还没有生成好")
 	}
@@ -439,7 +474,11 @@ func queueVC(v *Video, assetID int64) error {
 	if skip != "" {
 		return errors.New(skip)
 	}
-	_, err = db.Exec(`UPDATE videos SET vc_status='queued', vc_error='', vc_asset_id=? WHERE id=?`, a.ID, v.ID)
+	var o VCOverride
+	if len(ov) > 0 {
+		o = ov[0]
+	}
+	_, err = db.Exec(`UPDATE videos SET vc_status='queued', vc_error='', vc_asset_id=?, vc_override=? WHERE id=?`, a.ID, mustJSON(o), v.ID)
 	runner.poke()
 	touchEpisode(v.EpisodeID)
 	return err
@@ -471,9 +510,10 @@ func handleVideoVoiceConvert(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		AssetID int64 `json:"asset_id"`
 		Start   bool  `json:"start"`
+		VCOverride
 	}
 	_ = readJSON(r, &in)
-	if err := queueVC(v, in.AssetID); err != nil {
+	if err := queueVC(v, in.AssetID, in.VCOverride); err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
@@ -667,7 +707,7 @@ func (r *Runner) runVoiceNext(cfg ColabCfg) bool {
 }
 
 func (r *Runner) runVC(cfg ColabCfg, jup *Jupyter, v *Video, s *Shot, a *Asset, master *vcMasterCand, how string) {
-	vc := loadVCCfg()
+	vc := loadVCCfg().applyOverride(a.VcOverride).applyOverride(v.VcOverride)
 	r.mu.Lock()
 	r.Phase, r.Stage = "running", "统一音色"
 	r.mu.Unlock()
@@ -826,8 +866,10 @@ func (r *Runner) renderVC(ctx context.Context, jup *Jupyter, v *Video, master *v
 // ---------- MCP ----------
 
 var vcTools = []mcpTool{
-	{"convert_take_voice", "生成后统一音色：把一条已生成的视频（take）的人声转成说话角色的音色母带（Colab 上 demucs 分离人声 → Seed-VC 转换 → 和环境声混回），原版保留，转换版另存；完成后默认选用转换版（pick_take_version 可切回原版）。take_id 不填 = 这个镜头当前选用的视频。asset_id 不填 = 自动用镜头台词里的说话角色（没台词、只有旁白、多人对白、角色没母带时会说明原因并跳过）。只排队，运行时开着视频环境（colab_start purpose=video）时执行；start_runtime=true 会在运行时没开时开机（消耗 Colab 算力单元，先征得用户同意）。", obj(map[string]any{
+	{"convert_take_voice", "生成后统一音色：把一条已生成的视频（take）的人声转成说话角色的音色母带（Colab 上 demucs 分离人声 → Seed-VC 转换 → 和环境声混回），原版保留，转换版另存；完成后默认选用转换版（pick_take_version 可切回原版）。take_id 不填 = 这个镜头当前选用的视频。asset_id 不填 = 自动用镜头台词里的说话角色。可选传 diffusion_steps / cfg_rate / f0 / auto_f0 / semi_tone 做单次覆盖。只排队，运行时开着视频环境（colab_start purpose=video）时执行；start_runtime=true 会在运行时没开时开机（消耗 Colab 算力单元，先征得用户同意）。", obj(map[string]any{
 		"shot_id": num("镜头编号"), "take_id": num("视频编号（镜头的某条抽卡结果；不填 = 当前选用的那条）"), "asset_id": num("转成哪个角色的音色（不填 = 自动找说话角色）"),
+		"diffusion_steps": num("单次覆盖扩散步数 4–100（可选）"), "cfg_rate": numF("单次覆盖 CFG 0–1（可选）"),
+		"f0": boolp("单次覆盖是否启用 f0 音高条件（可选）"), "auto_f0": boolp("f0 开时自动对齐音高（可选）"), "semi_tone": num("f0 开时升降半音 -12 到 12（可选）"),
 		"start_runtime": boolp("运行时没开时开机（purpose=video，会消耗算力单元）"),
 	}, "shot_id")},
 	{"pick_take_version", "选一条视频用原版还是统一音色后的版本：成片、剪映草稿和下载都用选中的那一版。", obj(map[string]any{
@@ -839,6 +881,11 @@ var vcTools = []mcpTool{
 	{"set_voice_master", "查看或指定角色的音色母带（统一音色时 Seed-VC 的目标音色）。不给 sample 只返回候选（原声参考 voice_refs、音色样本）和当前用的那段；sample = 候选样本名则指定它；sample = auto 恢复自动（最长的原声参考，没有就用音色样本）。可用 listen_voice（asset_id）试听。", obj(map[string]any{
 		"asset_id": num("角色资产编号"), "sample": str("样本名；auto = 自动"),
 	}, "asset_id")},
+	{"set_voice_conv_override", "为单个角色设置或清除变声（Seed-VC）参数覆盖：支持 diffusion_steps / cfg_rate / f0 / auto_f0 / semi_tone（未给的字段沿用全局设置；reset=true 清除全部覆盖恢复全局）。", obj(map[string]any{
+		"asset_id": num("角色资产编号"), "diffusion_steps": num("扩散步数 4–100"), "cfg_rate": numF("CFG 0–1"),
+		"f0": boolp("是否启用 f0 音高条件"), "auto_f0": boolp("f0 开时自动对齐音高"), "semi_tone": num("f0 开时升降半音 -12 到 12"),
+		"reset": boolp("true = 清除该角色的覆盖参数，恢复全局设置"),
+	}, "asset_id")},
 }
 
 func callVCTool(ctx context.Context, name string, raw json.RawMessage, base string) (any, error) {
@@ -849,6 +896,7 @@ func callVCTool(ctx context.Context, name string, raw json.RawMessage, base stri
 			TakeID       int64 `json:"take_id"`
 			AssetID      int64 `json:"asset_id"`
 			StartRuntime bool  `json:"start_runtime"`
+			VCOverride
 		}
 		if err := strictArgs(raw, &a); err != nil {
 			return nil, err
@@ -874,7 +922,7 @@ func callVCTool(ctx context.Context, name string, raw json.RawMessage, base stri
 				return nil, errors.New("这个镜头还没有生成好的视频")
 			}
 		}
-		if err := queueVC(v, a.AssetID); err != nil {
+		if err := queueVC(v, a.AssetID, a.VCOverride); err != nil {
 			return nil, err
 		}
 		v, _ = getVideo(v.ID)
@@ -970,6 +1018,45 @@ func callVCTool(ctx context.Context, name string, raw json.RawMessage, base stri
 			m["next"] = "这个角色还没有可做母带的样本：用 clone_voice 从镜头原声（或上传音频）存一段原声参考，或 design_voice / set_voice 设一个带样本的音色，也可以从音色库 apply_library_voice。"
 		}
 		return m, nil
+	case "set_voice_conv_override":
+		var a struct {
+			AssetID int64 `json:"asset_id"`
+			Reset   bool  `json:"reset"`
+			VCOverride
+		}
+		if err := strictArgs(raw, &a); err != nil {
+			return nil, err
+		}
+		as, err := getAsset(a.AssetID)
+		if err != nil || as.Kind != "character" {
+			return nil, errors.New("角色不存在")
+		}
+		ov := as.VcOverride
+		if a.Reset {
+			ov = VCOverride{}
+		} else {
+			if a.DiffusionSteps != nil {
+				v := clampInt(*a.DiffusionSteps, 4, 100)
+				ov.DiffusionSteps = &v
+			}
+			if a.CfgRate != nil {
+				v := clampF(*a.CfgRate, 0, 1)
+				ov.CfgRate = &v
+			}
+			if a.F0 != nil {
+				ov.F0 = a.F0
+			}
+			if a.AutoF0 != nil {
+				ov.AutoF0 = a.AutoF0
+			}
+			if a.SemiTone != nil {
+				v := clampInt(*a.SemiTone, -12, 12)
+				ov.SemiTone = &v
+			}
+		}
+		_, _ = db.Exec(`UPDATE assets SET vc_override=? WHERE id=?`, mustJSON(ov), as.ID)
+		touchProject(as.ProjectID)
+		return map[string]any{"ok": true, "asset_id": as.ID, "name": as.Name, "vc_override": ov, "effective": loadVCCfg().applyOverride(ov)}, nil
 	}
 	return nil, errUnknownTool
 }

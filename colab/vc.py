@@ -183,6 +183,17 @@ def upload_weights_bg():
 
     def work():
         tar = W + "/upload_" + name
+        st = {}
+        try:
+            st = json.load(open(DRIVE_STATUS))
+        except Exception:
+            pass
+        st.setdefault("files", {})
+        st["uploading"] = True
+        try:
+            json.dump(st, open(DRIVE_STATUS, "w"))
+        except Exception:
+            pass
         try:
             dirs = " ".join("'" + d.lstrip("/") + "'" for d in weight_dirs())
             if not dirs:
@@ -190,16 +201,15 @@ def upload_weights_bg():
             subprocess.run(f"tar -cf '{tar}' -C / {dirs}", shell=True, check=True)
             fid = drive_upload(tar, name, DRIVE["folder_id"])
             if fid:
-                st = {}
-                try:
-                    st = json.load(open(DRIVE_STATUS))
-                except Exception:
-                    pass
-                st.setdefault("files", {})[name] = {"id": fid, "size": os.path.getsize(tar)}
-                json.dump(st, open(DRIVE_STATUS, "w"))
+                st["files"][name] = {"id": fid, "size": os.path.getsize(tar)}
         except Exception as e:
             print("[mj] WARN 变声权重上传缓存失败", str(e)[:200], flush=True)
         finally:
+            st["uploading"] = False
+            try:
+                json.dump(st, open(DRIVE_STATUS, "w"))
+            except Exception:
+                pass
             if os.path.exists(tar):
                 os.remove(tar)
 

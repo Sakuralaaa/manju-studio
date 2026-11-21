@@ -8,6 +8,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -105,6 +106,13 @@ func handleCapcutExport(w http.ResponseWriter, r *http.Request) {
 	}
 	draftName := safeName(fmt.Sprintf("%s_第%d集", p.Title, e.No))
 	root := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(r.URL.Query().Get("root")), `\`, "/"), "/")
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(draftName+"_剪映草稿.zip"))
+	_ = writeCapcutZip(w, tl, draftName, root)
+}
+
+func writeCapcutZip(w io.Writer, tl *timeline, draftName, root string) error {
+	p, e := tl.P, tl.E
 	draftID := jyUUID()
 	matPath := func(name string) string {
 		if root != "" {
@@ -246,8 +254,6 @@ func handleCapcutExport(w http.ResponseWriter, r *http.Request) {
 	}
 	cb, _ := json.MarshalIndent(content, "", "  ")
 	mb, _ := json.MarshalIndent(meta, "", "  ")
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(draftName+"_剪映草稿.zip"))
 	z := zipW{zip.NewWriter(w)}
 	defer z.Close()
 	z.add(draftName+"/draft_content.json", cb)
@@ -260,4 +266,5 @@ func handleCapcutExport(w http.ResponseWriter, r *http.Request) {
 			z.addFile(draftName+"/draft_cover"+filepath.Ext(im.File), filepath.Join(dataDir, "images", im.File))
 		}
 	}
+	return nil
 }

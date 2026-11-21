@@ -227,7 +227,7 @@ func episodeSteps(p *Project, e *Episode) Steps {
 	_ = db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(picked_image_id>0),0) FROM assets WHERE project_id=?`, p.ID).Scan(&s.Assets, &s.AssetsOK)
 	_ = db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(picked_image_id>0),0) FROM shots WHERE episode_id=?`, e.ID).Scan(&s.Shots, &s.Keyframes)
 	_ = db.QueryRow(`SELECT COUNT(DISTINCT shot_id) FROM videos WHERE episode_id=? AND status='done' AND shot_id IN (SELECT id FROM shots WHERE episode_id=?)`, e.ID, e.ID).Scan(&s.Videos)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE episode_id=? AND status IN ('queued','running')`, e.ID).Scan(&s.Queued)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE episode_id=? AND status IN ('queued','running','waiting_prev')`, e.ID).Scan(&s.Queued)
 	_ = db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(status='done'),0) FROM lines WHERE episode_id=?`, e.ID).Scan(&s.Lines, &s.LinesOK)
 	s.Done = []bool{
 		p.Title != "" && (strings.TrimSpace(e.Idea) != "" || strings.TrimSpace(p.Idea) != ""),

@@ -99,9 +99,10 @@ type Runner struct {
 	stopReq     string
 	cancelJob   context.CancelFunc
 	bootCancel  context.CancelFunc
-	postReady   VideoPost
-	teSpeed     bool // 运行时上 TE-Speed 加速节点可用
-	driveAt     time.Time
+	postReady      VideoPost
+	teSpeed        bool // 运行时上 TE-Speed 加速节点可用
+	driveAt        time.Time
+	driveIdleSince int64 // 空闲但因云盘仍在上传权重而暂缓关机的起始时间戳（ms）
 }
 
 var runner = &Runner{Phase: "off", wake: make(chan struct{}, 1)}
@@ -334,6 +335,7 @@ func (r *Runner) setConn(c *ConnInfo) {
 func (r *Runner) touch() {
 	r.mu.Lock()
 	r.LastActive = now()
+	r.driveIdleSince = 0
 	r.mu.Unlock()
 }
 
@@ -379,7 +381,7 @@ func (r *Runner) Stop(reason string) {
 		r.Phase, r.Runtime, r.jup, r.conn, r.Booted, r.CurrentJob, r.Stage, r.StagePct = "off", "", nil, nil, false, 0, "", 0
 		r.postReady = VideoPost{}
 		r.teSpeed = false
-		r.StartedAt, r.ReadyAt = 0, 0
+		r.StartedAt, r.ReadyAt, r.driveIdleSince = 0, 0, 0
 		if strings.HasPrefix(reason, "开机失败") {
 			_ = setSetting("colab_autostart_block", "1") // 开机失败后不再自动重试，等手动开机
 			r.Message = strings.TrimPrefix(reason, "开机失败：")
@@ -480,6 +482,20 @@ func (r *Runner) tick() {
 		return
 	}
 	if now()-last > int64(cfg.IdleMin)*60_000 {
+		if cfg.DriveCache && booted {
+			uploading := r.driveSync()
+			r.mu.Lock()
+			prev := r.driveIdleSince
+			deferStop, next := shouldDeferIdleStop(prev, now(), uploading, driveIdleMaxExt)
+			r.driveIdleSince = next
+			r.mu.Unlock()
+			if deferStop {
+				if prev == 0 {
+					r.logf("云端硬盘仍在上传权重缓存，暂缓空闲关机（最长延长 %d 分钟）", int(driveIdleMaxExt.Minutes()))
+				}
+				return
+			}
+		}
 		r.Stop(fmt.Sprintf("空闲 %d 分钟", cfg.IdleMin))
 	}
 }
@@ -646,6 +662,11 @@ func (r *Runner) runNext(cfg ColabCfg) {
 	if v.ShotID > 0 {
 		_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=? AND (picked_video_id=0 OR picked_video_id NOT IN (SELECT id FROM videos WHERE status='done'))`, id, v.ShotID)
 		touchProject(v.ProjectID)
+	}
+	if v.EpisodeID > 0 {
+		if n := unlockWaitingPrev(v.EpisodeID); n > 0 {
+			r.logf("解锁 %d 个等待上一镜头的首尾帧视频", n)
+		}
 	}
 	_, _ = db.Exec(`UPDATE sessions SET jobs_done=jobs_done+1 WHERE id=?`, sid)
 	r.logf("视频 #%d 完成，用时 %s", id, time.Since(start).Round(time.Second))

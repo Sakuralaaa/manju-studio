@@ -83,13 +83,15 @@ var moreTools = []mcpTool{
 	{"detach_image", "从资产里拿掉一张图（设定图 / 三视图 / 表情表 / 参考照 / 候选）并删除这张图；如果它是选用的，那个位置会变空。画室里的原图不受影响（attach_image 存进来的是副本）。必须传 confirm=true。", obj(map[string]any{
 		"asset_id": num("资产编号"), "image_id": num("图片编号"), "confirm": boolp("确认拿掉并删除"),
 	}, "asset_id", "image_id")},
-	{"clone_voice", "用一段原声给角色克隆音色：从镜头选定视频里抽音频（可指定 start / end 秒截取一段，最长 60 秒，至少 3 秒，10 秒以上效果好），或直接给 audio_base64 / audio_url。样本绑定为角色音色：语音渠道是 Fish 时在 Fish 建私有音色，否则走小米 MiMo 的 voiceclone（与设计音色样本同一条路）。样本同时存进角色的原声参考（voice_refs），以后可做声音转换参考。注意：视频原声里的背景音乐、环境声、别人的声音服务器不会去除，请用 start / end 挑一段只有这个角色说话、背景安静的片段，或自己处理干净后用 audio_base64 传。", obj(map[string]any{
+	{"clone_voice", "用一段原声给角色克隆音色：从镜头选定视频里抽音频（可指定 start / end 秒截取一段，最长 60 秒，至少 3 秒，10 秒以上效果好），或给 upload_id（先 POST /v1/uploads 上传大文件）、audio_base64、audio_url。样本绑定为角色音色：语音渠道是 Fish 时在 Fish 建私有音色，否则走小米 MiMo 的 voiceclone（与设计音色样本同一条路）。样本同时存进角色的原声参考（voice_refs），以后可做声音转换参考。注意：视频原声里的背景音乐、环境声、别人的声音服务器不会去除，请用 start / end 挑一段只有这个角色说话、背景安静的片段，或自己处理干净后通过 POST /v1/uploads 拿 upload_id 传。", obj(map[string]any{
 		"asset_id": num("角色资产编号"), "source_shot_id": num("从这个镜头的选定视频里抽音频"), "video_id": num("指定某个视频候选（可选，默认用镜头选定的）"),
+		"upload_id": str("先通过 POST /v1/uploads 上传得到的临时文件编号（大音频推荐）"),
 		"audio_base64": str("音频 base64 或 data URL（wav / mp3 / m4a 等）"), "audio_url": str("音频地址"),
 		"start": numF("从第几秒开始（可选）"), "end": numF("到第几秒结束（可选）"),
 		"channel_id":  num("语音渠道编号（可选）：不填时角色当前用 Fish 就用 Fish，否则用小米 MiMo"),
 		"sample_text": str("这段音频里说的话（可选，Fish 建音色时用；不填且没截取时取这个镜头里该角色的台词）"),
 		"description": str("音色描述（可选，记下来）"), "bind": boolp("设为角色音色，默认 true；false = 只存进原声参考"),
+		"clean": boolp("自动裁首尾静音并做响度归一（loudnorm），默认 true；false = 保留原始音频"),
 		"save_to_library": boolp("同时收进音色库（跨作品复用），默认 false"), "library_name": str("收进音色库时的名称（可选）"),
 	}, "asset_id")},
 }
@@ -909,6 +911,7 @@ type cloneArgs struct {
 	AssetID     int64    `json:"asset_id"`
 	ShotID      int64    `json:"source_shot_id"`
 	VideoID     int64    `json:"video_id"`
+	UploadID    string   `json:"upload_id"`
 	AudioB64    string   `json:"audio_base64"`
 	AudioURL    string   `json:"audio_url"`
 	Start       *float64 `json:"start"`
@@ -917,6 +920,7 @@ type cloneArgs struct {
 	SampleText  string   `json:"sample_text"`
 	Description string   `json:"description"`
 	Bind        *bool    `json:"bind"`
+	Clean       *bool    `json:"clean"`
 	SaveLib     bool     `json:"save_to_library"`
 	LibName     string   `json:"library_name"`
 }
@@ -949,8 +953,8 @@ func clipArgs(start, end *float64) ([]string, float64, float64, error) {
 	return args, s, d, nil
 }
 
-// extractVoiceWav 从媒体文件里截一段，转成 24k 单声道 wav
-func extractVoiceWav(in string, start, end *float64) ([]byte, float64, float64, error) {
+// extractVoiceWav 从媒体文件里截一段，转成 24k 单声道 wav；clean=true 时自动裁首尾静音并做响度归一
+func extractVoiceWav(in string, start, end *float64, clean bool) ([]byte, float64, float64, error) {
 	pre, s, d, err := clipArgs(start, end)
 	if err != nil {
 		return nil, 0, 0, err
@@ -961,17 +965,40 @@ func extractVoiceWav(in string, start, end *float64) ([]byte, float64, float64, 
 	}
 	defer os.RemoveAll(tmp)
 	out := filepath.Join(tmp, "out.wav")
-	args := append([]string{"-y", "-v", "error"}, pre...)
-	args = append(args, "-i", in, "-t", fmt.Sprintf("%.3f", d), "-vn", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", out)
-	if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
-		return nil, 0, 0, fmt.Errorf("抽取音频失败（视频可能没有声音）：%s", lastLines(string(b), 1))
+	runExtract := func(af string) ([]byte, float64, error) {
+		args := append([]string{"-y", "-v", "error"}, pre...)
+		args = append(args, "-i", in, "-t", fmt.Sprintf("%.3f", d), "-vn")
+		if af != "" {
+			args = append(args, "-af", af)
+		}
+		args = append(args, "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", out)
+		if b, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
+			return nil, 0, fmt.Errorf("抽取音频失败（视频可能没有声音）：%s", lastLines(string(b), 1))
+		}
+		ci, _ := probe(out)
+		data, err := os.ReadFile(out)
+		if err != nil || len(data) < 1000 {
+			return nil, 0, errors.New("抽出来的音频是空的（视频可能没有声音，或 start 超出了时长）")
+		}
+		return data, ci.dur, nil
 	}
-	ci, _ := probe(out)
-	data, err := os.ReadFile(out)
-	if err != nil || len(data) < 1000 {
-		return nil, 0, 0, errors.New("抽出来的音频是空的（视频可能没有声音，或 start 超出了时长）")
+	if clean {
+		const trimNorm = "silenceremove=start_periods=1:start_threshold=-40dB,areverse,silenceremove=start_periods=1:start_threshold=-40dB,areverse,loudnorm"
+		data, dur, err := runExtract(trimNorm)
+		if err == nil && dur >= 1.5 {
+			return data, dur, s, nil
+		}
+		// 极轻音量被静音检测误裁太短时，退回仅响度归一
+		data, dur, err = runExtract("loudnorm")
+		if err == nil {
+			return data, dur, s, nil
+		}
 	}
-	return data, ci.dur, s, nil
+	data, dur, err := runExtract("")
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return data, dur, s, nil
 }
 
 func fetchAudioURL(ctx context.Context, u string) ([]byte, error) {
@@ -1032,18 +1059,25 @@ func toolCloneVoice(ctx context.Context, raw json.RawMessage, base string, audio
 		return nil, errors.New("角色不存在")
 	}
 	srcN := 0
-	for _, x := range []bool{a.ShotID > 0 || a.VideoID > 0, strings.TrimSpace(a.AudioB64) != "", strings.TrimSpace(a.AudioURL) != ""} {
+	for _, x := range []bool{a.ShotID > 0 || a.VideoID > 0, strings.TrimSpace(a.UploadID) != "", strings.TrimSpace(a.AudioB64) != "", strings.TrimSpace(a.AudioURL) != ""} {
 		if x {
 			srcN++
 		}
 	}
 	if srcN != 1 {
-		return nil, errors.New("音频来源三选一：source_shot_id（可配 video_id）、audio_base64、audio_url")
+		return nil, errors.New("音频来源四选一：source_shot_id（可配 video_id）、upload_id、audio_base64、audio_url")
 	}
 	ref := VoiceRef{CreatedAt: now()}
 	var inPath string
 	text := strings.TrimSpace(a.SampleText)
 	switch {
+	case strings.TrimSpace(a.UploadID) != "":
+		p, _, err := resolveUpload(a.UploadID)
+		if err != nil {
+			return nil, err
+		}
+		inPath = p
+		ref.Source = "upload"
 	case a.ShotID > 0 || a.VideoID > 0:
 		var v *Video
 		if a.VideoID > 0 {
@@ -1111,7 +1145,8 @@ func toolCloneVoice(ctx context.Context, raw json.RawMessage, base string, audio
 			return nil, err
 		}
 	}
-	wav, dur, start, err := extractVoiceWav(inPath, a.Start, a.End)
+	clean := a.Clean == nil || *a.Clean
+	wav, dur, start, err := extractVoiceWav(inPath, a.Start, a.End, clean)
 	if err != nil {
 		return nil, err
 	}

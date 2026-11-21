@@ -133,6 +133,11 @@ var addCols = []struct{ table, col, def string }{
 	{"videos", "vc_use", "INTEGER NOT NULL DEFAULT 0"},
 	{"videos", "vc_info", "TEXT NOT NULL DEFAULT '{}'"},
 	{"videos", "vc_at", "INTEGER NOT NULL DEFAULT 0"},
+	// 0.2.13 结构化角色造型、审图暂停点、变声覆盖参数
+	{"assets", "look_json", "TEXT NOT NULL DEFAULT '{}'"},
+	{"assets", "vc_override", "TEXT NOT NULL DEFAULT '{}'"},
+	{"videos", "vc_override", "TEXT NOT NULL DEFAULT '{}'"},
+	{"pipelines", "pause_at", "TEXT NOT NULL DEFAULT '[]'"},
 }
 
 func hasCol(table, col string) bool {

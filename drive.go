@@ -150,39 +150,63 @@ func driveBootCfg(ctx context.Context, jup *Jupyter) (map[string]any, error) {
 	return map[string]any{"enabled": true, "folder_id": s.FolderID, "token_file": "/content/mj_drive_token", "status_file": "/content/mj_drive_status.json", "files": s.Files}, nil
 }
 
-// driveSync 刷新运行时里的令牌，并把后台上传完成的文件编号记下来
-func (r *Runner) driveSync() {
+const driveIdleMaxExt = 30 * time.Minute
+
+// shouldDeferIdleStop 空闲触发关机时，如果后台仍在上传云端硬盘权重，允许延长关机直到上传完成或达到上限
+func shouldDeferIdleStop(idleSince, nowMs int64, uploading bool, maxExt time.Duration) (deferStop bool, newIdleSince int64) {
+	if !uploading {
+		return false, 0
+	}
+	if idleSince == 0 {
+		return true, nowMs
+	}
+	if nowMs-idleSince < maxExt.Milliseconds() {
+		return true, idleSince
+	}
+	return false, idleSince
+}
+
+// driveSync 刷新运行时里的令牌，并把后台上传完成的文件编号（视频权重 + 变声权重）记下来；返回是否仍在上传中
+func (r *Runner) driveSync() bool {
 	r.mu.Lock()
 	jup := r.jup
 	r.mu.Unlock()
 	if jup == nil {
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	_ = pushDriveToken(ctx, jup)
-	var buf bytes.Buffer
-	if _, err := jup.Download(ctx, "/content/mj_drive_status.json", &buf); err != nil {
-		return
-	}
-	var st struct {
-		Files map[string]driveFile `json:"files"`
-	}
-	if json.Unmarshal(buf.Bytes(), &st) != nil {
-		return
-	}
+	uploading := false
 	s := loadDriveState()
 	n := 0
-	for k, v := range st.Files {
-		if v.ID != "" && s.Files[k].ID != v.ID {
-			s.Files[k] = v
-			n++
+	for _, remote := range []string{"/content/mj_drive_status.json", "/content/mj_vc_drive_status.json"} {
+		var buf bytes.Buffer
+		if _, err := jup.Download(ctx, remote, &buf); err != nil {
+			continue
+		}
+		var st struct {
+			Uploading bool                 `json:"uploading"`
+			Files     map[string]driveFile `json:"files"`
+		}
+		if json.Unmarshal(buf.Bytes(), &st) != nil {
+			continue
+		}
+		if st.Uploading {
+			uploading = true
+		}
+		for k, v := range st.Files {
+			if v.ID != "" && s.Files[k].ID != v.ID {
+				s.Files[k] = v
+				n++
+			}
 		}
 	}
 	if n > 0 {
 		saveDriveState(s)
 		r.logf("云端硬盘缓存新增 %d 个权重文件", n)
 	}
+	return uploading
 }
 
 func driveView(ctx context.Context) map[string]any {

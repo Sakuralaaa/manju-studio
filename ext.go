@@ -92,20 +92,25 @@ func toolColabExec(ctx context.Context, a execArgs) (any, error) {
 }
 
 type videoArgs struct {
-	Prompt      string `json:"prompt"`
-	ImageURL    string `json:"image_url"`
-	ImageBase64 string `json:"image_base64"`
-	ImageID     int64  `json:"image_id"`
-	ShotID      int64  `json:"shot_id"`
-	Seconds     int    `json:"seconds"`
-	Res         string `json:"resolution"`
-	Aspect      string `json:"aspect"`
-	Turbo       bool   `json:"turbo"`
-	Seed        int64  `json:"seed"`
-	Takes       int    `json:"takes"`
+	Prompt        string `json:"prompt"`
+	ImageURL      string `json:"image_url"`
+	ImageBase64   string `json:"image_base64"`
+	ImageUploadID string `json:"image_upload_id"`
+	ImageID       int64  `json:"image_id"`
+	ShotID        int64  `json:"shot_id"`
+	Seconds       int    `json:"seconds"`
+	Res           string `json:"resolution"`
+	Aspect        string `json:"aspect"`
+	Turbo         bool   `json:"turbo"`
+	Seed          int64  `json:"seed"`
+	Takes         int    `json:"takes"`
 }
 
 func loadImageBytes(ctx context.Context, a videoArgs) ([]byte, error) {
+	if strings.TrimSpace(a.ImageUploadID) != "" {
+		data, _, err := readUploadBytes(a.ImageUploadID)
+		return data, err
+	}
 	if a.ImageBase64 != "" {
 		s := a.ImageBase64
 		if i := strings.Index(s, ","); strings.HasPrefix(s, "data:") && i > 0 {
@@ -128,7 +133,7 @@ func loadImageBytes(ctx context.Context, a videoArgs) ([]byte, error) {
 		}
 		return io.ReadAll(io.LimitReader(resp.Body, 40<<20))
 	}
-	return nil, errors.New("需要 image_id、image_url 或 image_base64 之一")
+	return nil, errors.New("需要 image_id、image_upload_id、image_url 或 image_base64 之一")
 }
 
 func toolVideoSubmit(ctx context.Context, a videoArgs) (any, error) {
@@ -142,11 +147,15 @@ func toolVideoSubmit(ctx context.Context, a videoArgs) (any, error) {
 		if a.Turbo {
 			turbo = &a.Turbo
 		}
-		ids, err := queueShot(p, s, queueOpts{Seconds: a.Seconds, Turbo: turbo, Res: a.Res, Takes: a.Takes})
+		ids, err := queueShot(p, s, queueOpts{Seconds: a.Seconds, Turbo: turbo, Res: a.Res, Takes: a.Takes, AllowWaitPrev: true})
 		if err != nil && len(ids) == 0 {
 			return nil, err
 		}
-		return map[string]any{"id": ids[0], "ids": ids, "status": "queued", "estimate": estimateCU(len(ids), a.Turbo)}, nil
+		st := "queued"
+		if v, err := getVideo(ids[0]); err == nil && v.Status != "" {
+			st = v.Status
+		}
+		return map[string]any{"id": ids[0], "ids": ids, "status": st, "estimate": estimateCU(len(ids), a.Turbo)}, nil
 	}
 	var file string
 	if a.ImageID > 0 {
@@ -235,8 +244,26 @@ func shotView(s *Shot, base string) map[string]any {
 		m["video_url"] = fmt.Sprintf("%s/v1/videos/%d/file", base, v.ID)
 	}
 	takes := []int64{}
+	takeDetails := []map[string]any{}
 	versions := []map[string]any{}
+	pickedVid := int64(0)
+	if v := shotVideoFor(s); v != nil {
+		pickedVid = v.ID
+	}
 	for _, v := range s.Videos {
+		td := map[string]any{
+			"id": v.ID, "status": v.Status, "picked": v.ID == pickedVid,
+			"seconds": v.Seconds, "resolution": v.Res, "aspect": v.Aspect, "turbo": v.Turbo, "seed": v.Seed,
+			"progress": v.Progress, "stage": v.Stage, "created_at": v.CreatedAt, "finished_at": v.FinishedAt,
+		}
+		if v.Error != "" {
+			td["error"] = v.Error
+		}
+		if v.VcStatus != "" {
+			td["vc_status"] = v.VcStatus
+			td["vc_use"] = v.VcUse && v.VcFile != ""
+		}
+		takeDetails = append(takeDetails, td)
 		if v.Status == "done" {
 			takes = append(takes, v.ID)
 			if v.VcStatus != "" {
@@ -247,6 +274,7 @@ func shotView(s *Shot, base string) map[string]any {
 		}
 	}
 	m["takes"] = takes
+	m["take_details"] = takeDetails
 	if p, err := getProject(s.ProjectID); err == nil {
 		m["voice_unify"] = vcPreview(p, s)
 	}
@@ -325,8 +353,9 @@ func toolEpisode(ctx context.Context, eid int64, base string) (any, error) {
 }
 
 type pipeArgs struct {
-	EpisodeID int64  `json:"episode_id"`
-	Mode      string `json:"mode"`
+	EpisodeID int64    `json:"episode_id"`
+	Mode      string   `json:"mode"`
+	PauseAt   []string `json:"pause_at"`
 }
 
 func toolAutopilot(ctx context.Context, action string, a pipeArgs) (any, error) {
@@ -335,7 +364,7 @@ func toolAutopilot(ctx context.Context, action string, a pipeArgs) (any, error) 
 	}
 	switch action {
 	case "start":
-		return startPipe(a.EpisodeID, a.Mode)
+		return startPipe(a.EpisodeID, a.Mode, a.PauseAt...)
 	case "continue":
 		lp := latestPipe(a.EpisodeID)
 		if lp == nil || (lp.Status != "confirm" && lp.Status != "failed" && lp.Status != "canceled" && lp.Status != "waiting_writer") {
@@ -405,13 +434,37 @@ func toolTTS(ctx context.Context, a ttsArgs, base string) (any, error) {
 	return map[string]any{"url": base + "/v1/audio/" + name, "duration": dur}, nil
 }
 
-type imageArgs = studioIn
+type imageArgs struct {
+	studioIn
+	Wait *bool `json:"wait"`
+}
 
 func toolImageGenerate(ctx context.Context, a imageArgs, base string) (any, error) {
+	a.Owner = "ext"
+	if a.Wait != nil && !*a.Wait {
+		if _, _, _, _, _, err := studioPrepare(a.studioIn); err != nil {
+			return nil, err
+		}
+		tid, err := startTaskR(0, 0, "studio", "ext", studioSeq.Add(1), func(tctx context.Context, tid int64) error {
+			ims, err := studioRun(tctx, a.studioIn)
+			if err != nil {
+				return err
+			}
+			ids := make([]int64, 0, len(ims))
+			for _, im := range ims {
+				ids = append(ids, im.ID)
+			}
+			setTaskResult(tid, map[string]any{"image_ids": ids})
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "task_id": tid, "status": "running", "note": "已异步提交生图；用 get_task_status 轮询完成后拿 image_ids，再用 view_image 看图。"}, nil
+	}
 	c, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
-	a.Owner = "ext"
-	ims, err := studioRun(c, a)
+	ims, err := studioRun(c, a.studioIn)
 	if err != nil {
 		return nil, err
 	}
@@ -581,6 +634,7 @@ type keyframeArgs struct {
 	RefIDs    []int64  `json:"ref_image_ids"`
 	Extra     string   `json:"extra_prompt"`
 	RefTags   []string `json:"ref_tags"`
+	Wait      *bool    `json:"wait"`
 }
 
 func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error) {
@@ -611,14 +665,148 @@ func toolKeyframe(ctx context.Context, a keyframeArgs, base string) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	if a.Wait != nil && !*a.Wait {
+		return map[string]any{"ok": true, "shot_id": s.ID, "task_id": tid, "status": "running", "note": "已开始生成关键帧；用 get_task_status 查进度，完成后用 view_shot 看效果。"}, nil
+	}
 	ims, err := waitImages(ctx, tid, "shot", s.ID, before, base)
 	if err != nil {
 		return nil, err
 	}
 	if ims == nil {
-		return map[string]any{"task_id": tid, "note": "还在生成，稍后用 view_shot 查看"}, nil
+		return map[string]any{"task_id": tid, "note": "还在生成，稍后用 get_task_status 或 view_shot 查看"}, nil
 	}
 	return map[string]any{"ok": true, "shot_id": s.ID, "images": ims, "note": "新关键帧已放进候选；原来没有选定时自动选用。用 view_shot 看效果。"}, nil
+}
+
+type taskStatusArgs struct {
+	TaskID    int64   `json:"task_id"`
+	TaskIDs   []int64 `json:"task_ids"`
+	ProjectID int64   `json:"project_id"`
+	EpisodeID int64   `json:"episode_id"`
+}
+
+func taskView(t *Task) map[string]any {
+	m := map[string]any{
+		"task_id": t.ID, "project_id": t.ProjectID, "episode_id": t.EpisodeID, "kind": t.Kind,
+		"owner_type": t.OwnerType, "owner_id": t.OwnerID, "status": t.Status, "error": t.Error,
+		"created_at": t.CreatedAt, "finished_at": t.FinishedAt,
+	}
+	if t.Result != "" {
+		var r any
+		if json.Unmarshal([]byte(t.Result), &r) == nil {
+			m["result"] = r
+		} else {
+			m["result"] = t.Result
+		}
+	}
+	return m
+}
+
+func toolTaskStatus(ctx context.Context, a taskStatusArgs) (any, error) {
+	ids := append([]int64{}, a.TaskIDs...)
+	if a.TaskID > 0 {
+		ids = append([]int64{a.TaskID}, ids...)
+	}
+	if len(ids) > 0 {
+		if len(ids) > 50 {
+			return nil, errors.New("一次最多查询 50 个任务")
+		}
+		out := []map[string]any{}
+		seen := map[int64]bool{}
+		running, done, failed := 0, 0, 0
+		for _, id := range ids {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			t, err := getTask(id)
+			if err != nil {
+				out = append(out, map[string]any{"task_id": id, "status": "not_found"})
+				continue
+			}
+			switch t.Status {
+			case "running":
+				running++
+			case "done":
+				done++
+			case "failed":
+				failed++
+			}
+			out = append(out, taskView(t))
+		}
+		return map[string]any{"tasks": out, "running": running, "done": done, "failed": failed, "all_done": running == 0}, nil
+	}
+	if a.EpisodeID > 0 {
+		rows, err := db.Query(`SELECT id,project_id,episode_id,kind,owner_type,owner_id,status,error,result,created_at,finished_at FROM tasks WHERE episode_id=? ORDER BY id DESC LIMIT 40`, a.EpisodeID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := []map[string]any{}
+		running := 0
+		for rows.Next() {
+			var t Task
+			if rows.Scan(&t.ID, &t.ProjectID, &t.EpisodeID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.Result, &t.CreatedAt, &t.FinishedAt) == nil {
+				if t.Status == "running" {
+					running++
+				}
+				out = append(out, taskView(&t))
+			}
+		}
+		return map[string]any{"tasks": out, "running": running, "all_done": running == 0}, nil
+	}
+	if a.ProjectID > 0 {
+		rows, err := db.Query(`SELECT id,project_id,episode_id,kind,owner_type,owner_id,status,error,result,created_at,finished_at FROM tasks WHERE project_id=? ORDER BY id DESC LIMIT 40`, a.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := []map[string]any{}
+		running := 0
+		for rows.Next() {
+			var t Task
+			if rows.Scan(&t.ID, &t.ProjectID, &t.EpisodeID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.Result, &t.CreatedAt, &t.FinishedAt) == nil {
+				if t.Status == "running" {
+					running++
+				}
+				out = append(out, taskView(&t))
+			}
+		}
+		return map[string]any{"tasks": out, "running": running, "all_done": running == 0}, nil
+	}
+	return nil, errors.New("需要 task_id、task_ids、episode_id 或 project_id")
+}
+
+type missingKFArgs struct {
+	EpisodeID int64  `json:"episode_id"`
+	ChannelID int64  `json:"channel_id"`
+	Model     string `json:"model"`
+}
+
+func toolGenerateMissingKeyframes(ctx context.Context, a missingKFArgs) (any, error) {
+	p, e, err := epCtx(a.EpisodeID)
+	if err != nil {
+		return nil, err
+	}
+	tids, skipped, lastErr := startMissingKeyframesDetail(p, e, imgOverride{ChannelID: a.ChannelID, Model: a.Model})
+	if len(tids) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	if tids == nil {
+		tids = []int64{}
+	}
+	return map[string]any{
+		"ok": true, "episode_id": e.ID, "started": len(tids), "skipped": skipped, "task_ids": tids,
+		"note": "已批量启动缺失关键帧的异步任务；用 get_task_status（task_ids）轮询进度。",
+	}, nil
+}
+
+func extKeyframesMissing(w http.ResponseWriter, r *http.Request) {
+	var a missingKFArgs
+	_ = readJSON(r, &a)
+	a.EpisodeID = pathID(r)
+	v, err := toolGenerateMissingKeyframes(r.Context(), a)
+	extReply(w, v, err)
 }
 
 // ---------- REST ----------
@@ -842,7 +1030,7 @@ var mcpTools = []mcpTool{
 		"code": str("要执行的 Python 代码"), "timeout_sec": num("超时秒数，默认 300，最多 1800"),
 	}, "code")},
 	{"video_submit", "提交一个图生视频任务（MiniMax H3，首帧 + 描述 → 5–10 秒带声音的视频）。给 shot_id 时直接用该镜头的关键帧和描述。", obj(map[string]any{
-		"prompt": str("视频描述：动作、运镜、声音"), "image_id": num("已有图片编号"), "image_url": str("首帧图片地址"), "image_base64": str("首帧图片 base64"),
+		"prompt": str("视频描述：动作、运镜、声音"), "image_id": num("已有图片编号"), "image_upload_id": str("POST /v1/uploads 返回的临时上传文件编号"), "image_url": str("首帧图片地址"), "image_base64": str("首帧图片 base64"),
 		"shot_id": num("作品里的镜头编号"), "takes": num("抽卡次数 1–4，只对 shot_id 有效"), "seconds": num("时长 5–10 秒，默认 5"), "resolution": map[string]any{"type": "string", "enum": []string{"768p", "480p"}},
 		"aspect": str("画幅，如 9:16、16:9、1:1"), "turbo": boolp("使用 Turbo 8 步"), "seed": num("随机种子"),
 	})},
@@ -854,8 +1042,9 @@ var mcpTools = []mcpTool{
 		"project_id": num("作品编号"), "idea": str("本集梗概，可留空"), "ai_idea": boolp("自动拟定梗概"),
 	}, "project_id")},
 	{"get_episode", "查看一集的剧本、摘要、各步骤状态和分镜。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
-	{"autopilot_start", "一键成集：梗概→剧本→资产→分镜→关键帧→配音→视频（只排队，按算力设置决定是否开机）→成片→摘要与封面。mode=auto 全自动；mode=ask 在剧本、资产、分镜之后暂停等确认；mode=writer（外部编剧）在梗概、剧本、分镜处暂停（状态 waiting_writer），由你调用 save_synopsis / save_script / upsert_asset / save_shots 写入后自动继续，应用不调用文本模型。", obj(map[string]any{
+	{"autopilot_start", "一键成集：梗概→剧本→资产→分镜→关键帧→配音→视频（只排队，按算力设置决定是否开机）→成片→摘要与封面。mode=auto 全自动；mode=ask 在剧本、资产、分镜之后暂停等确认；mode=writer（外部编剧）在梗概、剧本、分镜处暂停（状态 waiting_writer），由你调用 save_synopsis / save_script / upsert_asset / save_shots 写入后自动继续，应用不调用文本模型。支持 pause_at（所有模式通用），例如 [\"assets_img\", \"keyframes\"] 在资产图/三视图后和关键帧后停下审图。", obj(map[string]any{
 		"episode_id": num("集编号"), "mode": map[string]any{"type": "string", "enum": []string{"auto", "ask", "writer"}},
+		"pause_at": map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"script", "assets", "assets_img", "storyboard", "keyframes"}}, "description": "审图/确认暂停点（所有模式通用）：assets / assets_img = 资产图与三视图完成后暂停；keyframes = 关键帧完成后暂停；script / storyboard = 剧本或分镜后暂停"},
 	}, "episode_id")},
 	{"autopilot_status", "查询一键成集进度：状态（running / confirm / waiting / waiting_writer / done / failed / canceled）、当前阶段、日志。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
 	{"autopilot_continue", "确认当前暂停点（或从失败处重试），继续一键成集。", obj(map[string]any{"episode_id": num("集编号")}, "episode_id")},
@@ -873,12 +1062,13 @@ var mcpTools = []mcpTool{
 		"description": str("这段音色的描述（记下来以后改用）"), "synth_channel_id": num("配音用哪个渠道（可选）：设计用 MiMo、配音交给 Fish 时填 Fish 渠道编号；只填这个不填 sample = 把已选音色换到这个渠道配音"), "voice": map[string]any{"type": "object", "description": "直接指定音色：channel_id、mode、voice、sample、speed"},
 	})},
 	{"list_image_channels", "列出生图渠道：渠道编号、可用模型、参考图上限。指定渠道和模型出图前先看这个。", obj(map[string]any{})},
-	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载；返回图片编号，用 view_image 看图。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。", obj(map[string]any{
+	{"image_generate", "自由出图（不挂作品）：生成的图放进应用的「画室」，用户能在界面里看和下载；返回图片编号，用 view_image 看图。可带参考图锁脸 / 定风格；要放进作品用 attach_image。给作品角色出图请优先用 generate_asset_image（会自动带上角色的参考图）。传 wait=false 立即返回 task_id，再用 get_task_status 轮询。", obj(map[string]any{
 		"prompt": str("提示词。带参考图时写清每张参考图是谁、参考什么，如「参考图1是同一个人，脸型五官保持一致，只改发型和服装」"), "channel_id": num("渠道编号（list_image_channels），不填用第一个生图渠道"), "model": str("模型名，不填用渠道的第一个模型"),
 		"aspect": str("比例，如 9:16、3:4、1:1、16:9"), "n": num("张数 1–4"),
 		"ref_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "参考图：应用里已有图片的编号（资产图、画室图都行，view_asset_images 能看到编号）"},
 		"ref_images":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "参考图：base64 或 data URL"},
 		"realistic":     boolp("追加真人实拍质感的固定描述"),
+		"wait":          boolp("是否等出完再返回，默认 true；false 立即返回 task_id"),
 	}, "prompt")},
 	{"generate_asset_image", "给作品资产出图（设定图 / 三视图 / 表情表），自动带上参考图：角色自己已选定的图、手动加的参考照、以及「同一个人另一时期」的本体角色（只锁脸，发型服装按这个角色自己的外观）。默认等出完再返回新图编号。", obj(map[string]any{
 		"asset_id": num("资产编号"), "project_id": num("作品编号（配合 code）"), "code": str("资产编号，如 C03"),
@@ -887,20 +1077,29 @@ var mcpTools = []mcpTool{
 		"channel_id": num("渠道编号，不填用作品设置里的生图渠道"), "model": str("模型名"),
 		"face_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "只用这几张图锁脸（图片编号，任何资产、任何候选、画室图都行），不再自动带角色已选定的图和本体。用户说「拿某张图当参考出一张」时用这个"},
 		"extra_prompt":   str("这一次额外的要求，如「年龄 30 岁左右，炭灰高领毛衣配黑大衣」"),
-		"wait":           boolp("等出完再返回，默认 true"),
+		"wait":           boolp("等出完再返回，默认 true；false 立即返回 task_id，再用 get_task_status 轮询"),
 	})},
-	{"generate_keyframe", "给一个镜头生成关键帧：自动按镜头里的资产带上角色 / 场景参考图。可指定渠道和模型；extra_prompt / ref_tags 只影响这一次。默认等出完再返回，已有的关键帧候选都保留。", obj(map[string]any{
+	{"generate_keyframe", "给一个镜头生成关键帧：自动按镜头里的资产带上角色 / 场景参考图。可指定渠道和模型；extra_prompt / ref_tags 只影响这一次。默认等出完再返回（传 wait=false 立即返回 task_id，避免大批量出图超时），已有的关键帧候选都保留。", obj(map[string]any{
 		"shot_id": num("镜头编号"), "n": num("张数 1–4，默认 1"), "channel_id": num("渠道编号，不填用作品设置"), "model": str("模型名"),
 		"ref_image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "这个镜头额外的参考图编号（构图、姿势、氛围、道具），最多 4 张，会保存在镜头上；传空数组清掉。人物的脸仍按角色资产自动带"},
 		"extra_prompt":  str("只对这一次出图追加的要求（不保存到镜头），如「她左手拿着一把黑伞，抬头看雨」。要长期改提示词用 update_shot"),
 		"ref_tags":      map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"main", "sheet", "expr"}}, "description": "只对这一次：角色带哪几类图（按顺序取第一张有的）。不填 = 默认（三视图优先 + 固定造型）。[\"main\"] = 只用设定图锁脸，不带三视图、不注入固定造型，适合换装 / 特殊姿势的镜头"},
+		"wait":          boolp("等出完再返回，默认 true；false 立即返回 task_id，用 get_task_status 查进度"),
 	}, "shot_id")},
+	{"generate_missing_keyframes", "批量为一集所有还没有关键帧的镜头异步启动关键帧生成任务，立即返回 task_ids，再用 get_task_status 轮询进度。", obj(map[string]any{
+		"episode_id": num("集编号"), "channel_id": num("生图渠道编号（可选，不填用作品设置）"), "model": str("模型名（可选）"),
+	}, "episode_id")},
+	{"get_task_status", "查询异步后台任务状态（生图、关键帧、成片、封面、配音等）：支持单个 task_id、批量 task_ids（最多 50 个），或按 episode_id / project_id 列出最近任务。", obj(map[string]any{
+		"task_id": num("单个任务编号"), "task_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "批量任务编号（最多 50 个）"},
+		"episode_id": num("列出该集最近任务"), "project_id": num("列出该作品最近任务"),
+	})},
 	{"pick_image", "把一张图设为选用（定稿）：资产的设定图 / 三视图 / 表情表、镜头的关键帧、封面。后续出图和关键帧都用选用的那张。候选图编号用 view_asset_images / view_shot 看。", obj(map[string]any{
 		"image_id": num("图片编号"),
 	}, "image_id")},
-	{"upload_image", "上传一张图（base64 或 data URL），比如用户在对话里发给你的照片：不填 asset_id 放进画室；填了就存进资产，tag 同 attach_image（ref = 参考照）。返回图片编号，之后可用于 face_image_ids / ref_image_ids。拿不到图片数据时，请用户在网页里资产卡片的「参考」页上传。", obj(map[string]any{
-		"image": str("base64 或 data URL"), "asset_id": num("目标资产编号，可不填"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
-	}, "image")},
+	{"upload_image", "上传一张图（优先用 POST /v1/uploads 返回的 upload_id，或直接给 base64 / data URL）：不填 asset_id 放进画室；填了就存进资产，tag 同 attach_image（ref = 参考照）。返回图片编号，之后可用于 face_image_ids / ref_image_ids。", obj(map[string]any{
+		"upload_id": str("POST /v1/uploads 返回的临时上传文件编号（推荐，避免大 base64）"), "image": str("base64 或 data URL（与 upload_id 二选一）"),
+		"asset_id": num("目标资产编号，可不填"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
+	})},
 	{"attach_image", "把一张图（画室里的、别的资产的都行）复制进某个资产：tag 空 = 设为设定图并选用；sheet / expr = 三视图 / 表情表；ref = 参考照（以后给它出图时用来锁脸或定外形）。", obj(map[string]any{
 		"image_id": num("图片编号"), "asset_id": num("目标资产编号"), "tag": map[string]any{"type": "string", "enum": []string{"", "sheet", "expr", "ref"}},
 	}, "image_id", "asset_id")},
@@ -1010,7 +1209,7 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 	case "ping":
 		return ok(map[string]any{})
 	case "tools/list":
-		return ok(map[string]any{"tools": append(append(append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), vcTools...), linkTools...), mcpTools...)})
+		return ok(map[string]any{"tools": append(append(append(append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), vcTools...), linkTools...), opsTools...), mcpTools...)})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -1034,6 +1233,9 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 		}
 		if errors.Is(err, errUnknownTool) {
 			v, err = callLinkTool(ctx, p.Name, p.Arguments, base)
+		}
+		if errors.Is(err, errUnknownTool) {
+			v, err = callOpsTool(ctx, p.Name, p.Arguments, base)
 		}
 		if errors.Is(err, errUnknownTool) {
 			v, err = callTool(ctx, p.Name, p.Arguments, base)
@@ -1124,6 +1326,7 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		var a struct {
 			EpisodeID json.Number `json:"episode_id"`
 			Mode      string      `json:"mode"`
+			PauseAt   []string    `json:"pause_at"`
 			Force     bool        `json:"force"`
 		}
 		_ = json.Unmarshal(args, &a)
@@ -1134,7 +1337,7 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		case "generate_dub":
 			return toolLines(ctx, id, a.Force)
 		}
-		return toolAutopilot(ctx, strings.TrimPrefix(name, "autopilot_"), pipeArgs{EpisodeID: id, Mode: a.Mode})
+		return toolAutopilot(ctx, strings.TrimPrefix(name, "autopilot_"), pipeArgs{EpisodeID: id, Mode: a.Mode, PauseAt: a.PauseAt})
 	case "design_voice", "set_voice":
 		var a voiceToolArgs
 		_ = json.Unmarshal(args, &a)
@@ -1163,12 +1366,21 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 		return map[string]any{"ok": true, "image_id": im.ID, "note": "已设为选用"}, nil
 	case "upload_image":
 		var a struct {
-			Image   string `json:"image"`
-			AssetID int64  `json:"asset_id"`
-			Tag     string `json:"tag"`
+			UploadID string `json:"upload_id"`
+			Image    string `json:"image"`
+			AssetID  int64  `json:"asset_id"`
+			Tag      string `json:"tag"`
 		}
 		_ = json.Unmarshal(args, &a)
-		data, err := decodeB64Image(a.Image)
+		var data []byte
+		var err error
+		if strings.TrimSpace(a.UploadID) != "" {
+			data, _, err = readUploadBytes(a.UploadID)
+		} else if strings.TrimSpace(a.Image) != "" {
+			data, err = decodeB64Image(a.Image)
+		} else {
+			return nil, errors.New("需要 upload_id 或 image（base64 / data URL）")
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1198,6 +1410,18 @@ func callTool(ctx context.Context, name string, args json.RawMessage, base strin
 			return nil, err
 		}
 		return toolKeyframe(ctx, a, base)
+	case "generate_missing_keyframes":
+		var a missingKFArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return toolGenerateMissingKeyframes(ctx, a)
+	case "get_task_status":
+		var a taskStatusArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return toolTaskStatus(ctx, a)
 	case "image_generate":
 		var a imageArgs
 		_ = json.Unmarshal(args, &a)

@@ -172,9 +172,9 @@ def drive_token():
     except Exception:
         return ""
 
-def drive_status_write(files):
+def drive_status_write(files, uploading=False):
     try:
-        json.dump({"files": files}, open(DRIVE["status_file"], "w"))
+        json.dump({"uploading": bool(uploading), "files": files}, open(DRIVE["status_file"], "w"))
     except Exception:
         pass
 
@@ -211,14 +211,18 @@ def drive_upload(path, name, folder, progress=None):
 def drive_upload_all(files):
     """后台线程：把这次从网上下载的权重传到云端硬盘缓存文件夹。"""
     done = {}
-    for f in files:
-        try:
-            fid = drive_upload(f["path"], f["name"], DRIVE["folder_id"])
-            if fid:
-                done[f["name"]] = {"id": fid, "size": os.path.getsize(f["path"])}
-                drive_status_write(done)
-        except Exception as e:
-            print("[mj] WARN 上传缓存失败", f["name"], str(e)[:200], flush=True)
+    drive_status_write(done, uploading=True)
+    try:
+        for f in files:
+            try:
+                fid = drive_upload(f["path"], f["name"], DRIVE["folder_id"])
+                if fid:
+                    done[f["name"]] = {"id": fid, "size": os.path.getsize(f["path"])}
+                    drive_status_write(done, uploading=True)
+            except Exception as e:
+                print("[mj] WARN 上传缓存失败", f["name"], str(e)[:200], flush=True)
+    finally:
+        drive_status_write(done, uploading=False)
 
 def file_list(base):
     files = []

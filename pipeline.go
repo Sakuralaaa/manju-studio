@@ -27,6 +27,7 @@ type Pipe struct {
 	Status    string    `json:"status"` // running / confirm / waiting / waiting_writer / done / failed / canceled
 	Stage     string    `json:"stage"`
 	Message   string    `json:"message"`
+	PauseAt   []string  `json:"pause_at"`
 	Confirmed []string  `json:"confirmed"`
 	Log       []PipeLog `json:"log"`
 	StartedAt int64     `json:"started_at"`
@@ -37,22 +38,26 @@ var pipeStages = []string{"idea", "script", "assets", "storyboard", "keyframes",
 
 func scanPipe(sc interface{ Scan(...any) error }) (*Pipe, error) {
 	var p Pipe
-	var conf, lg string
-	if err := sc.Scan(&p.ID, &p.EpisodeID, &p.Mode, &p.Status, &p.Stage, &p.Message, &conf, &lg, &p.StartedAt, &p.UpdatedAt); err != nil {
+	var conf, lg, pa string
+	if err := sc.Scan(&p.ID, &p.EpisodeID, &p.Mode, &p.Status, &p.Stage, &p.Message, &conf, &lg, &pa, &p.StartedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(conf), &p.Confirmed)
 	_ = json.Unmarshal([]byte(lg), &p.Log)
+	_ = json.Unmarshal([]byte(pa), &p.PauseAt)
 	if p.Confirmed == nil {
 		p.Confirmed = []string{}
 	}
 	if p.Log == nil {
 		p.Log = []PipeLog{}
 	}
+	if p.PauseAt == nil {
+		p.PauseAt = []string{}
+	}
 	return &p, nil
 }
 
-const pipeCols = `id,episode_id,mode,status,stage,message,confirmed,log,started_at,updated_at`
+const pipeCols = `id,episode_id,mode,status,stage,message,confirmed,log,pause_at,started_at,updated_at`
 
 func latestPipe(eid int64) *Pipe {
 	p, err := scanPipe(db.QueryRow(`SELECT `+pipeCols+` FROM pipelines WHERE episode_id=? ORDER BY id DESC LIMIT 1`, eid))
@@ -88,14 +93,48 @@ func (p *Pipe) say(format string, a ...any) {
 	p.save()
 }
 
-func startPipe(eid int64, mode string) (*Pipe, error) {
+func normPauseAt(mode string, raw []string) ([]string, error) {
+	valid := map[string]string{
+		"script":     "script",
+		"assets":     "assets",
+		"assets_img": "assets",
+		"storyboard": "storyboard",
+		"keyframes":  "keyframes",
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, s := range raw {
+		k := strings.TrimSpace(strings.ToLower(s))
+		if k == "" {
+			continue
+		}
+		mapped, ok := valid[k]
+		if !ok {
+			return nil, fmt.Errorf("pause_at 不支持「%s」，可选：script / assets（或 assets_img）/ storyboard / keyframes", s)
+		}
+		if !seen[mapped] {
+			seen[mapped] = true
+			out = append(out, mapped)
+		}
+	}
+	if mode == "ask" && len(out) == 0 {
+		out = []string{"script", "assets", "storyboard"}
+	}
+	return out, nil
+}
+
+func startPipe(eid int64, mode string, pauseAt ...string) (*Pipe, error) {
 	if lp := latestPipe(eid); lp != nil && (lp.Status == "running" || lp.Status == "waiting" || lp.Status == "confirm" || lp.Status == "waiting_writer") {
 		return nil, errors.New("这一集已经在一键成集中")
 	}
 	if mode != "ask" && mode != "writer" {
 		mode = "auto"
 	}
-	res, err := db.Exec(`INSERT INTO pipelines(episode_id,mode,status,started_at,updated_at) VALUES(?,?, 'running', ?, ?)`, eid, mode, now(), now())
+	pa, err := normPauseAt(mode, pauseAt)
+	if err != nil {
+		return nil, err
+	}
+	res, err := db.Exec(`INSERT INTO pipelines(episode_id,mode,status,pause_at,started_at,updated_at) VALUES(?,?, 'running', ?, ?, ?)`, eid, mode, mustJSON(pa), now(), now())
 	if err != nil {
 		return nil, err
 	}
@@ -191,8 +230,16 @@ func runPipe(id int64) {
 
 var errPipePause = errors.New("pause")
 
+func (pp *Pipe) wantsPause(stage string) bool {
+	if len(pp.PauseAt) > 0 {
+		return contains(pp.PauseAt, stage)
+	}
+	// 兼容升级前的旧记录（pause_at 为空数组）
+	return pp.Mode == "ask" && (stage == "script" || stage == "assets" || stage == "storyboard")
+}
+
 func (pp *Pipe) confirmed(stage string) bool {
-	return pp.Mode != "ask" || contains(pp.Confirmed, stage)
+	return !pp.wantsPause(stage) || contains(pp.Confirmed, stage)
 }
 
 func (pp *Pipe) askConfirm(stage, msg string) error {
@@ -401,6 +448,9 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 			return fmt.Errorf("镜头 %s 没能生成关键帧", s.Code)
 		}
 	}
+	if err := pp.askConfirm("keyframes", "关键帧已全部生成，审核并选定后继续"); err != nil {
+		return err
+	}
 	// 6. 配音
 	p, e, _ = reload()
 	if p.AudioMode == "dub" {
@@ -427,7 +477,7 @@ func pipeBody(ctx context.Context, pp *Pipe) error {
 			busy := false
 			var lastFail *Video
 			for _, v := range s.Videos {
-				if v.Status == "queued" || v.Status == "running" {
+				if v.Status == "queued" || v.Status == "running" || v.Status == "waiting_prev" {
 					busy = true
 				}
 				if v.Status == "failed" {
@@ -521,10 +571,11 @@ func handlePipeStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Mode string `json:"mode"`
+		Mode    string   `json:"mode"`
+		PauseAt []string `json:"pause_at"`
 	}
 	_ = readJSON(r, &in)
-	p, err := startPipe(e.ID, in.Mode)
+	p, err := startPipe(e.ID, in.Mode, in.PauseAt...)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return

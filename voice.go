@@ -52,6 +52,25 @@ func (v VoiceSpec) sig(text, emotion string) string {
 	return hex.EncodeToString(h[:8])
 }
 
+// cleanLineAudioFiles 删除匹配台词记录在磁盘上对应的配音文件（避免重写/删分镜留下孤儿音频）
+func cleanLineAudioFiles(where string, args ...any) {
+	rows, err := db.Query(`SELECT audio_file FROM lines `+where, args...)
+	if err != nil {
+		return
+	}
+	var files []string
+	for rows.Next() {
+		var f string
+		if rows.Scan(&f) == nil && f != "" {
+			files = append(files, f)
+		}
+	}
+	rows.Close()
+	for _, f := range files {
+		_ = os.Remove(filepath.Join(dataDir, "audio", filepath.Base(f)))
+	}
+}
+
 var ttsHTTP = &http.Client{Timeout: 3 * time.Minute}
 
 const fishDefaultBase = "https://api.fish.audio"

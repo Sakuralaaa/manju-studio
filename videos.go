@@ -61,10 +61,11 @@ type Video struct {
 	VcFile    string         `json:"-"`
 	VcURL     string         `json:"vc_url"`
 	VcError   string         `json:"vc_error"` // 失败原因或跳过原因
-	VcAssetID int64          `json:"vc_asset_id"`
-	VcUse     bool           `json:"vc_use"`
-	VcInfo    map[string]any `json:"vc_info"`
-	VcAt      int64          `json:"vc_at"`
+	VcAssetID  int64          `json:"vc_asset_id"`
+	VcUse      bool           `json:"vc_use"`
+	VcInfo     map[string]any `json:"vc_info"`
+	VcAt       int64          `json:"vc_at"`
+	VcOverride VCOverride     `json:"vc_override"`
 }
 
 // useFile 成片 / 下载用的那一版：选了转换版且转换版存在时用转换版，否则原版
@@ -75,18 +76,19 @@ func (v *Video) useFile() string {
 	return v.File
 }
 
-const videoCols = `id,project_id,episode_id,shot_id,source,status,progress,stage,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,file,bytes,error,post,est_cu,created_at,started_at,finished_at,vc_status,vc_file,vc_error,vc_asset_id,vc_use,vc_info,vc_at`
+const videoCols = `id,project_id,episode_id,shot_id,source,status,progress,stage,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,file,bytes,error,post,est_cu,created_at,started_at,finished_at,vc_status,vc_file,vc_error,vc_asset_id,vc_use,vc_info,vc_at,vc_override`
 
 func scanVideoNoPos(sc interface{ Scan(...any) error }) (*Video, error) {
 	var v Video
 	var turbo, vcUse int
-	var post, vcInfo string
+	var post, vcInfo, vcOv string
 	if err := sc.Scan(&v.ID, &v.ProjectID, &v.EpisodeID, &v.ShotID, &v.Source, &v.Status, &v.Progress, &v.Stage, &v.Prompt, &v.ImageFile, &v.LastImageFile, &v.Seconds, &v.Res, &v.Aspect, &turbo, &v.Seed, &v.File, &v.Bytes, &v.Error, &post, &v.EstCU, &v.CreatedAt, &v.StartedAt, &v.FinishedAt,
-		&v.VcStatus, &v.VcFile, &v.VcError, &v.VcAssetID, &vcUse, &vcInfo, &v.VcAt); err != nil {
+		&v.VcStatus, &v.VcFile, &v.VcError, &v.VcAssetID, &vcUse, &vcInfo, &v.VcAt, &vcOv); err != nil {
 		return nil, err
 	}
 	v.Turbo, v.VcUse = turbo == 1, vcUse == 1
 	_ = json.Unmarshal([]byte(vcInfo), &v.VcInfo)
+	_ = json.Unmarshal([]byte(vcOv), &v.VcOverride)
 	if v.VcFile != "" {
 		v.VcURL = "/files/videos/" + v.VcFile
 	}
@@ -157,10 +159,11 @@ type videoIn struct {
 	Turbo         bool
 	Seed          int64
 	Post          VideoPost
+	WaitingPrev   bool
 }
 
 func enqueueVideo(in videoIn) (int64, error) {
-	if strings.TrimSpace(in.ImageFile) == "" {
+	if !in.WaitingPrev && strings.TrimSpace(in.ImageFile) == "" {
 		return 0, errors.New("缺少首帧图片")
 	}
 	if strings.TrimSpace(in.Prompt) == "" {
@@ -189,68 +192,44 @@ func enqueueVideo(in videoIn) (int64, error) {
 	if in.ShotID > 0 && shotWantsVC(in.ShotID) {
 		vcSt = "auto" // 视频出来后自动转成说话角色的音色
 	}
-	res, err := db.Exec(`INSERT INTO videos(project_id,episode_id,shot_id,source,status,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,post,est_cu,created_at,vc_status) VALUES(?,?,?,?, 'queued', ?,?,?,?,?,?,?,?,?,?,?,?)`,
-		in.ProjectID, in.EpisodeID, in.ShotID, in.Source, in.Prompt, in.ImageFile, in.LastImageFile, in.Seconds, in.Res, in.Aspect, b2i(in.Turbo), in.Seed, mustJSON(in.Post), est, now(), vcSt)
+	status, stage := "queued", ""
+	if in.WaitingPrev {
+		status, stage = "waiting_prev", "等待上一镜头完成"
+	}
+	res, err := db.Exec(`INSERT INTO videos(project_id,episode_id,shot_id,source,status,stage,prompt,image_file,last_image_file,seconds,res,aspect,turbo,seed,post,est_cu,created_at,vc_status) VALUES(?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.ProjectID, in.EpisodeID, in.ShotID, in.Source, status, stage, in.Prompt, in.ImageFile, in.LastImageFile, in.Seconds, in.Res, in.Aspect, b2i(in.Turbo), in.Seed, mustJSON(in.Post), est, now(), vcSt)
 	if err != nil {
 		return 0, err
 	}
-	runner.poke()
+	if !in.WaitingPrev {
+		runner.poke()
+	}
 	return res.LastInsertId()
 }
 
-// shotVideoPrompt 视频描述：画风 + 运镜 + 动作 + 声音。
-// 原生声音：台词交给 H3 一起生成；配音覆盖：只要口型和环境声，人声由配音轨提供。
+// shotVideoPrompt 视频描述（MiniMax H3 官方多模态格式，默认按镜头时长与首尾帧模式组装）
 func shotVideoPrompt(p *Project, s *Shot) string {
-	parts := []string{}
-	if st := strings.TrimSpace(p.Style); st != "" {
-		parts = append(parts, st+"风格")
+	sec := int(s.Duration + 0.5)
+	if sec < 5 {
+		sec = 5
 	}
-	if isRealistic(p) {
-		parts = append(parts, realVideoTail)
-	}
-	if s.Camera != "" {
-		parts = append(parts, "镜头："+s.Camera)
-	}
-	if s.VideoPrompt != "" {
-		parts = append(parts, s.VideoPrompt)
-	} else if s.Action != "" {
-		parts = append(parts, s.Action)
-	}
-	if d := strings.TrimSpace(s.Dialogue); d != "" {
-		if p.AudioMode == "dub" {
-			var talkers []string
-			for _, pl := range parseDialogue(d) {
-				if pl.kind == "dialogue" && !contains(talkers, pl.speaker) {
-					talkers = append(talkers, pl.speaker)
-				}
-			}
-			if len(talkers) > 0 {
-				parts = append(parts, strings.Join(talkers, "、")+"在说话，嘴部自然开合，节奏与台词一致")
-			}
-			parts = append(parts, "声音只要环境音和动作音效，不要任何人声、旁白和背景音乐")
-		} else {
-			parts = append(parts, "台词（中文配音，口型对上）："+d)
-		}
-	}
-	if s.Chain == "first" {
-		parts = append(parts, "从首帧画面自然过渡到尾帧画面，动作连贯")
-	}
-	parts = append(parts, "画面稳定连贯，人物外貌与首帧保持一致，不出现字幕")
-	return strings.Join(parts, "。")
+	return shotVideoPromptFor(p, s, sec, s.Chain == "first")
 }
 
 type queueOpts struct {
-	Seconds int
-	Turbo   *bool
-	Res     string
-	Takes   int
+	Seconds       int
+	Turbo         *bool
+	Res           string
+	Takes         int
+	AllowWaitPrev bool
 }
 
 func projectPost(p *Project) VideoPost {
 	return VideoPost{Upscale: p.PostUpscale, Interp: p.PostInterp}
 }
 
-// queueShot 给一个镜头排队 N 次抽卡；首尾帧衔接时首帧用上一镜头的最后一帧、尾帧用本镜头关键帧
+// queueShot 给一个镜头排队 N 次抽卡；首尾帧衔接时首帧用上一镜头的最后一帧、尾帧用本镜头关键帧。
+// AllowWaitPrev=true 且上一镜还没出片时，排成 waiting_prev，待上一镜完成后自动补首帧开跑。
 func queueShot(p *Project, s *Shot, o queueOpts) ([]int64, error) {
 	if s.PickedImageID == 0 {
 		return nil, fmt.Errorf("镜头 %s 还没有关键帧", s.Code)
@@ -260,17 +239,24 @@ func queueShot(p *Project, s *Shot, o queueOpts) ([]int64, error) {
 		return nil, errors.New("关键帧不存在")
 	}
 	var busy int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE shot_id=? AND status IN ('queued','running')`, s.ID).Scan(&busy)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE shot_id=? AND status IN ('queued','running','waiting_prev')`, s.ID).Scan(&busy)
 	if busy > 0 {
 		return nil, fmt.Errorf("镜头 %s 已在队列中", s.Code)
 	}
 	first, last := im.File, ""
+	waitPrev := false
 	if s.Chain == "first" {
 		lf, err := ensurePrevLastFrame(s)
 		if err != nil {
-			return nil, fmt.Errorf("镜头 %s：%s", s.Code, err.Error())
+			if o.AllowWaitPrev && prevShot(s) != nil {
+				waitPrev = true
+				first, last = "", im.File
+			} else {
+				return nil, fmt.Errorf("镜头 %s：%s", s.Code, err.Error())
+			}
+		} else {
+			first, last = lf.File, im.File
 		}
-		first, last = lf.File, im.File
 	}
 	sec := o.Seconds
 	if sec == 0 {
@@ -291,14 +277,40 @@ func queueShot(p *Project, s *Shot, o queueOpts) ([]int64, error) {
 	n = clampInt(n, 1, 4)
 	var ids []int64
 	for i := 0; i < n; i++ {
-		id, err := enqueueVideo(videoIn{ProjectID: p.ID, EpisodeID: s.EpisodeID, ShotID: s.ID, Source: "project", Prompt: shotVideoPrompt(p, s), ImageFile: first, LastImageFile: last,
-			Seconds: sec, Res: res, Aspect: p.Aspect, Turbo: turbo, Post: projectPost(p)})
+		id, err := enqueueVideo(videoIn{ProjectID: p.ID, EpisodeID: s.EpisodeID, ShotID: s.ID, Source: "project", Prompt: shotVideoPromptFor(p, s, sec, last != ""), ImageFile: first, LastImageFile: last,
+			Seconds: sec, Res: res, Aspect: p.Aspect, Turbo: turbo, Post: projectPost(p), WaitingPrev: waitPrev})
 		if err != nil {
 			return ids, err
 		}
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// unlockWaitingPrev 上一镜完成或改选后，检查本集 waiting_prev 的首尾帧视频，补上首帧并推入 queued
+func unlockWaitingPrev(episodeID int64) int {
+	if episodeID <= 0 {
+		return 0
+	}
+	vs := listVideos(`WHERE episode_id=? AND status='waiting_prev' ORDER BY id`, episodeID)
+	unlocked := 0
+	for _, v := range vs {
+		s, err := getShot(v.ShotID)
+		if err != nil {
+			continue
+		}
+		lf, err := ensurePrevLastFrame(s)
+		if err != nil {
+			continue
+		}
+		_, _ = db.Exec(`UPDATE videos SET image_file=?, status='queued', stage='' WHERE id=? AND status='waiting_prev'`, lf.File, v.ID)
+		unlocked++
+	}
+	if unlocked > 0 {
+		runner.poke()
+		touchEpisode(episodeID)
+	}
+	return unlocked
 }
 
 func handleShotVideo(w http.ResponseWriter, r *http.Request) {
@@ -315,7 +327,7 @@ func handleShotVideo(w http.ResponseWriter, r *http.Request) {
 		Takes   int    `json:"takes"`
 	}
 	_ = readJSON(r, &in)
-	ids, err := queueShot(p, s, queueOpts{in.Seconds, in.Turbo, in.Res, in.Takes})
+	ids, err := queueShot(p, s, queueOpts{Seconds: in.Seconds, Turbo: in.Turbo, Res: in.Res, Takes: in.Takes, AllowWaitPrev: true})
 	if err != nil && len(ids) == 0 {
 		httpErr(w, 400, err.Error())
 		return
@@ -324,7 +336,7 @@ func handleShotVideo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ids": ids})
 }
 
-// queueEpisode 排队本集还缺视频的镜头（mode=all 时全部重来）
+// queueEpisode 排队本集还缺视频的镜头（mode=all 时全部重来）；首尾帧镜头在上一镜未完成时自动排为 waiting_prev
 func queueEpisode(p *Project, e *Episode, mode string) (int, int, error) {
 	n, skipped := 0, 0
 	var lastErr error
@@ -335,7 +347,7 @@ func queueEpisode(p *Project, e *Episode, mode string) (int, int, error) {
 			if v.Status == "done" {
 				hasDone = true
 			}
-			if v.Status == "queued" || v.Status == "running" {
+			if v.Status == "queued" || v.Status == "running" || v.Status == "waiting_prev" {
 				busy = true
 			}
 		}
@@ -346,13 +358,7 @@ func queueEpisode(p *Project, e *Episode, mode string) (int, int, error) {
 			skipped++
 			continue
 		}
-		if s.Chain == "first" {
-			if pv := prevShot(s); pv == nil || shotVideoFor(pv) == nil {
-				skipped++ // 等上一镜头出视频后再排
-				continue
-			}
-		}
-		ids, err := queueShot(p, s, queueOpts{})
+		ids, err := queueShot(p, s, queueOpts{AllowWaitPrev: true})
 		n += len(ids)
 		if err != nil {
 			lastErr = err
@@ -401,6 +407,7 @@ func handleVideoPick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=?`, v.ID, v.ShotID)
+	unlockWaitingPrev(v.EpisodeID)
 	touchEpisode(v.EpisodeID)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -411,7 +418,7 @@ func cancelVideo(id int64) error {
 		return errors.New("视频不存在")
 	}
 	switch v.Status {
-	case "queued":
+	case "queued", "waiting_prev":
 		_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE id=?`, now(), id)
 	case "running":
 		_, _ = db.Exec(`UPDATE videos SET status='canceled', finished_at=? WHERE id=?`, now(), id)
@@ -443,7 +450,7 @@ func handleVideoCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleVideoList(w http.ResponseWriter, r *http.Request) {
-	vs := listVideos(`WHERE status IN ('queued','running') OR finished_at>? ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, id DESC LIMIT 60`, now()-24*3600_000)
+	vs := listVideos(`WHERE status IN ('queued','running','waiting_prev') OR finished_at>? ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'waiting_prev' THEN 2 ELSE 3 END, id DESC LIMIT 60`, now()-24*3600_000)
 	titles := map[int64]string{}
 	for _, v := range vs {
 		if v.EpisodeID > 0 && titles[v.EpisodeID] == "" {
@@ -669,13 +676,7 @@ func buildTimeline(p *Project, e *Episode) (*timeline, error) {
 				t += d + gap
 			}
 		} else {
-			texts := parseDialogue(s.Dialogue)
-			if len(texts) > 0 && ci.dur > 0 {
-				seg := ci.dur / float64(len(texts))
-				for k, pl := range texts {
-					c.Subs = append(c.Subs, tlLine{L: &Line{Text: pl.text, Speaker: pl.speaker}, Start: float64(k) * seg, Dur: seg - 0.05})
-				}
-			}
+			c.Subs = allocateNativeSubs(parseDialogue(s.Dialogue), ci.dur)
 		}
 		tl.Clips = append(tl.Clips, c)
 		tl.Total += ci.dur
@@ -721,6 +722,78 @@ func handleFinalBuild(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"task_id": tid})
 }
 
+var subPunctRe = regexp.MustCompile(`[\s，。！？；：、,.!?;:“”"'‘’（）()\[\]【】—…-]+`)
+
+// allocateNativeSubs 原声模式按每句台词有效字数比例分配字幕时段（避免长短句平均切分导致飘移）
+func allocateNativeSubs(texts []parsedLine, dur float64) []tlLine {
+	if len(texts) == 0 || dur <= 0 {
+		return nil
+	}
+	weights := make([]float64, len(texts))
+	totalW := 0.0
+	for i, pl := range texts {
+		clean := subPunctRe.ReplaceAllString(strings.TrimSpace(pl.text), "")
+		w := float64(len([]rune(clean)))
+		if w < 2 {
+			w = 2
+		}
+		weights[i] = w
+		totalW += w
+	}
+	gap := 0.06
+	if len(texts) <= 1 || dur <= float64(len(texts))*0.2 {
+		gap = 0
+	}
+	avail := dur - gap*float64(len(texts)-1)
+	if avail <= 0 {
+		avail = dur
+		gap = 0
+	}
+	out := make([]tlLine, 0, len(texts))
+	t := 0.0
+	for i, pl := range texts {
+		d := avail * (weights[i] / totalW)
+		if d < 0.05 {
+			d = 0.05
+		}
+		if t+d > dur {
+			d = dur - t
+		}
+		out = append(out, tlLine{L: &Line{Text: pl.text, Speaker: pl.speaker}, Start: t, Dur: d})
+		t += d + gap
+	}
+	return out
+}
+
+// subtitleStyle 按画幅与分辨率自适应计算 ASS 字幕字号与底部留白（修复竖屏在 PlayResY=H/2 下字体偏小约 44% 的问题）
+func subtitleStyle(w, h int) (playW, playH, fontSize, marginV int) {
+	playW, playH = w/2, h/2
+	if playW < 100 {
+		playW = 540
+	}
+	if playH < 100 {
+		playH = 540
+	}
+	// 以画布高度为基准：横屏约 2.6% 高度（1080p -> PlayResY 540 -> FontSize 14），
+	// 竖屏 PlayResY 更长、一行宽度更窄，按短边与纵横比折中，保证竖屏与横屏观感一致且不轻易折三行。
+	if h > w {
+		// 竖屏（如 1080x1920 -> 540x960；768x1344 -> 384x672）：字号约占短边宽度 4.4%（960 高下约 24px，768 竖屏约 17px）
+		fontSize = int(float64(playW)*0.044 + 0.5)
+		marginV = int(float64(playH)*0.08 + 0.5)
+	} else {
+		// 横屏 / 方形（如 1920x1080 -> 960x540）：字号约占高度 2.8%（540 高下约 15px）
+		fontSize = int(float64(playH)*0.028 + 0.5)
+		marginV = int(float64(playH)*0.075 + 0.5)
+	}
+	if fontSize < 12 {
+		fontSize = 12
+	}
+	if marginV < 24 {
+		marginV = 24
+	}
+	return
+}
+
 func finalTask(p *Project, e *Episode) (int64, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return 0, errors.New("服务器上没有 ffmpeg")
@@ -729,7 +802,7 @@ func finalTask(p *Project, e *Episode) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return startTask(p.ID, e.ID, "final", "episode", e.ID, func(ctx context.Context) error {
+	return startTaskR(p.ID, e.ID, "final", "episode", e.ID, func(ctx context.Context, tid int64) error {
 		name, err := buildFinal(ctx, tl)
 		if err != nil {
 			return err
@@ -740,6 +813,7 @@ func finalTask(p *Project, e *Episode) (int64, error) {
 			_ = os.Remove(filepath.Join(dataDir, "videos", old))
 			_ = os.Remove(filepath.Join(dataDir, "videos", strings.TrimSuffix(old, ".mp4")+".srt"))
 		}
+		setTaskResult(tid, map[string]any{"episode_id": e.ID, "final_file": name})
 		return nil
 	})
 }
@@ -787,8 +861,9 @@ func buildFinal(ctx context.Context, tl *timeline) (string, error) {
 		}
 		vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=24,format=yuv420p", W, H, W, H)
 		if e.Subtitles && clipSrt != "" {
-			style := "FontName=Noto Sans CJK SC,FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,MarginV=40"
-			vf += ",subtitles=" + ffEscape(clipSrt) + ":original_size=" + fmt.Sprintf("%dx%d", W/2, H/2) + ":force_style='" + style + "'"
+			pw, ph, fs, mv := subtitleStyle(W, H)
+			style := fmt.Sprintf("FontName=Noto Sans CJK SC,FontSize=%d,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,MarginV=%d", fs, mv)
+			vf += ",subtitles=" + ffEscape(clipSrt) + ":original_size=" + fmt.Sprintf("%dx%d", pw, ph) + ":force_style='" + style + "'"
 		}
 		out := filepath.Join(tmp, fmt.Sprintf("c%03d.mp4", i))
 		args := []string{"-i", c.Path}

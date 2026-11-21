@@ -364,11 +364,35 @@ type Task struct {
 	OwnerID    int64  `json:"owner_id"`
 	Status     string `json:"status"`
 	Error      string `json:"error"`
+	Result     string `json:"result,omitempty"`
 	CreatedAt  int64  `json:"created_at"`
 	FinishedAt int64  `json:"finished_at"`
 }
 
+func setTaskResult(tid int64, v any) {
+	if tid <= 0 {
+		return
+	}
+	_, _ = db.Exec(`UPDATE tasks SET result=? WHERE id=?`, mustJSON(v), tid)
+}
+
+func getTask(id int64) (*Task, error) {
+	var t Task
+	err := db.QueryRow(`SELECT id,project_id,episode_id,kind,owner_type,owner_id,status,error,result,created_at,finished_at FROM tasks WHERE id=?`, id).
+		Scan(&t.ID, &t.ProjectID, &t.EpisodeID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.Result, &t.CreatedAt, &t.FinishedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 func startTask(projectID, episodeID int64, kind, ownerType string, ownerID int64, fn func(ctx context.Context) error) (int64, error) {
+	return startTaskR(projectID, episodeID, kind, ownerType, ownerID, func(ctx context.Context, _ int64) error {
+		return fn(ctx)
+	})
+}
+
+func startTaskR(projectID, episodeID int64, kind, ownerType string, ownerID int64, fn func(ctx context.Context, tid int64) error) (int64, error) {
 	var busy int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE status='running' AND kind=? AND owner_type=? AND owner_id=?`, kind, ownerType, ownerID).Scan(&busy)
 	if busy > 0 {
@@ -390,7 +414,7 @@ func startTask(projectID, episodeID int64, kind, ownerType string, ownerID int64
 					err = fmt.Errorf("内部错误：%v", rec)
 				}
 			}()
-			err = fn(ctx)
+			err = fn(ctx, id)
 		}()
 		if err != nil {
 			_, _ = db.Exec(`UPDATE tasks SET status='failed', error=?, finished_at=? WHERE id=?`, err.Error(), now(), id)
@@ -421,9 +445,7 @@ func listTasks(projectID int64) []*Task {
 }
 
 func handleTaskGet(w http.ResponseWriter, r *http.Request) {
-	var t Task
-	err := db.QueryRow(`SELECT id,project_id,episode_id,kind,owner_type,owner_id,status,error,created_at,finished_at FROM tasks WHERE id=?`, pathID(r)).
-		Scan(&t.ID, &t.ProjectID, &t.EpisodeID, &t.Kind, &t.OwnerType, &t.OwnerID, &t.Status, &t.Error, &t.CreatedAt, &t.FinishedAt)
+	t, err := getTask(pathID(r))
 	if err != nil {
 		httpErr(w, 404, "任务不存在")
 		return

@@ -1,0 +1,455 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
+	"mime/multipart"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func setupTestEnv(t *testing.T) func() {
+	t.Helper()
+	dir := t.TempDir()
+	oldDir := dataDir
+	oldDB := db
+	dataDir = dir
+	for _, d := range []string{"images", "videos", "audio", "exports", "tmp"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := openDB(dir); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if db != nil {
+			_ = db.Close()
+		}
+		dataDir = oldDir
+		db = oldDB
+	}
+}
+
+func makePNGBytes(w, h int, c color.RGBA) []byte {
+	im := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			im.SetRGBA(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, im)
+	return buf.Bytes()
+}
+
+func TestUploadsAndTaskStatus(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	fw, err := mw.CreateFormFile("file", "sample.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pngData := makePNGBytes(32, 32, color.RGBA{200, 100, 50, 255})
+	_, _ = fw.Write(pngData)
+	_ = mw.Close()
+
+	req := httptest.NewRequest("POST", "/v1/uploads", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	extUpload(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		OK       bool   `json:"ok"`
+		UploadID string `json:"upload_id"`
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || !res.OK || !validUploadID(res.UploadID) {
+		t.Fatalf("unexpected upload response: %s", rec.Body.String())
+	}
+	got, meta, err := readUploadBytes(res.UploadID)
+	if err != nil || !bytes.Equal(got, pngData) || meta.Filename != "sample.png" {
+		t.Fatalf("readUploadBytes mismatch: err=%v meta=%+v", err, meta)
+	}
+
+	// upload_image 支持 upload_id
+	out, err := callTool(context.Background(), "upload_image", json.RawMessage(`{"upload_id":"`+res.UploadID+`"}`), "http://test")
+	if err != nil {
+		t.Fatalf("upload_image via upload_id failed: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["ok"] != true || m["image_id"].(int64) <= 0 {
+		t.Fatalf("unexpected upload_image out: %+v", m)
+	}
+
+	// get_task_status 查任务结果
+	r, err := db.Exec(`INSERT INTO tasks(project_id,episode_id,kind,owner_type,owner_id,status,result,created_at,finished_at) VALUES(1,1,'image','shot',9,'done','{"image_ids":[101]}',?,?)`, now(), now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid, _ := r.LastInsertId()
+	tsOut, err := toolTaskStatus(context.Background(), taskStatusArgs{TaskIDs: []int64{tid, 99999}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm := tsOut.(map[string]any)
+	if tm["done"] != 1 || tm["all_done"] != true {
+		t.Fatalf("unexpected task status: %+v", tm)
+	}
+}
+
+func TestConsistencyLookJSONAndClauseExtraction(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	res, err := db.Exec(`INSERT INTO projects(title,style,created_at,updated_at) VALUES('测试剧','电影感',?,?)`, now(), now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := res.LastInsertId()
+
+	// 1) 结构化 look_json：不拼接重复到 description、不输出否定词、不拼出「戴不戴帽子」
+	raw := json.RawMessage(`{
+		"project_id": ` + jsonInt(pid) + `,
+		"kind": "character",
+		"name": "阿策",
+		"description": "40出头阳光摇滚型男，爱笑爱张罗，眼神深处藏着防备心，发誓要守住秘密。",
+		"look": {
+			"age": "视觉年龄32岁",
+			"gender": "男",
+			"hair": "绝对不戴帽子，蓬松高层次黑褐色碎短发",
+			"face": "剑眉星目，高挺鼻梁，清晰下颌线",
+			"body": "宽肩窄腰挺拔身材",
+			"outfit": "黑色修身机车皮夹克内搭纯白T恤，黑色长裤",
+			"accessories": "银色吊坠项链、金属手环（绝对不戴任何帽子）",
+			"avoid": ["帽子", "手持物"]
+		}
+	}`)
+	out, err := toolUpsertAsset(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("toolUpsertAsset failed: %v", err)
+	}
+	m := out.(map[string]any)
+	fixed := m["fixed_look"].(string)
+	for _, bad := range []string{"不戴帽子", "戴不戴", "防备心", "发誓", "爱笑"} {
+		if strings.Contains(fixed, bad) {
+			t.Fatalf("fixed_look should not contain %q, got: %s", bad, fixed)
+		}
+	}
+	for _, want := range []string{"蓬松高层次黑褐色碎短发", "黑色修身机车皮夹克", "银色吊坠项链"} {
+		if !strings.Contains(fixed, want) {
+			t.Fatalf("fixed_look missing %q, got: %s", want, fixed)
+		}
+	}
+	// description 不应被双写追加
+	if strings.Contains(m["description"].(string), "银色吊坠项链") {
+		t.Fatalf("description should not duplicate look_json content: %s", m["description"])
+	}
+	a, _ := getAsset(m["asset_id"].(int64))
+	if len(a.Look.Avoid) != 2 || a.Look.Avoid[0] != "帽子" {
+		t.Fatalf("avoid not persisted: %+v", a.Look.Avoid)
+	}
+
+	// 2) 老资产（无 look_json）回退抽句：按小句切分，过滤性格句与否定句，绝不拦腰截断半个词
+	legacy := &Asset{
+		Kind: "character",
+		Name: "旧角色",
+		Description: "绝对不戴任何帽子，一头蓬松利落的黑色碎短发，眼神总是带着倦意，发誓要查清真相，" +
+			"穿炭灰色高领毛衣配黑色羊绒大衣，左耳戴一枚极简银色耳钉（双手自然空着，不拿任何手持物品）。",
+	}
+	gotLegacy := charLook(&Project{}, legacy)
+	for _, bad := range []string{"不戴", "倦意", "发誓", "空着", "手持"} {
+		if strings.Contains(gotLegacy, bad) {
+			t.Fatalf("legacy charLook leaked %q: %s", bad, gotLegacy)
+		}
+	}
+	if !strings.Contains(gotLegacy, "黑色碎短发") || !strings.Contains(gotLegacy, "炭灰色高领毛衣") || !strings.Contains(gotLegacy, "银色耳钉") {
+		t.Fatalf("legacy charLook missed visual traits: %s", gotLegacy)
+	}
+}
+
+func TestPauseAtNormalization(t *testing.T) {
+	pa, err := normPauseAt("writer", []string{"assets_img", "keyframes", "assets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pa) != 2 || pa[0] != "assets" || pa[1] != "keyframes" {
+		t.Fatalf("unexpected pause_at: %+v", pa)
+	}
+	pp := &Pipe{Mode: "writer", PauseAt: pa}
+	if pp.confirmed("assets") || pp.confirmed("keyframes") || !pp.confirmed("script") {
+		t.Fatalf("pause_at check failed for writer mode")
+	}
+	pp.Confirmed = append(pp.Confirmed, "assets")
+	if !pp.confirmed("assets") || pp.confirmed("keyframes") {
+		t.Fatalf("confirmed state transition failed")
+	}
+	if _, err := normPauseAt("auto", []string{"invalid_stage"}); err == nil {
+		t.Fatalf("expected error for invalid pause_at stage")
+	}
+}
+
+func TestH3OfficialPromptFormat(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	res, _ := db.Exec(`INSERT INTO projects(title,style,kind,audio_mode,created_at,updated_at) VALUES('故人','半写实影视','live','native',?,?)`, now(), now())
+	pid, _ := res.LastInsertId()
+	p, _ := getProject(pid)
+	_, _ = insertAsset(pid, "character", assetDraft{Name: "阿策", Description: "碎短发"})
+	_, _ = db.Exec(`UPDATE assets SET look_json=?, voice=? WHERE project_id=?`, `{"age":"32岁","gender":"男"}`, `{"desc":"爽朗青年男声"}`, pid)
+
+	s := &Shot{
+		Duration:    8,
+		Camera:      "中近景 · 缓慢推近",
+		VideoPrompt: "阿策笑着摆手往椅背一靠，窗外雪山飞掠。",
+		Dialogue:    "阿策：（笑）别把我俩捆热搜好不好？\n旁白：十年未见的旧队友再次同车。",
+	}
+	i2va := shotVideoPromptFor(p, s, 8, false)
+	for _, want := range []string{
+		"For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.",
+		"integrated_multimodal_description: [Shot 1] Live-action, cinematic",
+		"The camera pushes in at slow speed.",
+		"(S1)", "<d>[Chinese] 别把我俩捆热搜好不好？</d>",
+		"says in an off-screen voiceover: <d>[Chinese] 十年未见的旧队友再次同车。</d> while on-screen characters' lips remain completely closed.",
+		"overall_soundscape:",
+		"non_diegetic_music: N/A",
+	} {
+		if !strings.Contains(i2va, want) {
+			t.Fatalf("I2VA prompt missing %q:\n%s", want, i2va)
+		}
+	}
+
+	// FL2VA 首尾帧对齐头行
+	fl2va := shotVideoPromptFor(p, s, 8, true)
+	if !strings.Contains(fl2va, "How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 1) aligns with the") {
+		t.Fatalf("FL2VA prompt header wrong:\n%s", fl2va)
+	}
+
+	// dub 模式不放 <d> 且不含禁用词清单「不要人声」
+	p.AudioMode = "dub"
+	dubP := shotVideoPromptFor(p, s, 5, false)
+	if strings.Contains(dubP, "<d>") || strings.Contains(dubP, "不要任何人声") {
+		t.Fatalf("dub prompt should not contain <d> or negative ban list:\n%s", dubP)
+	}
+
+	// 已手写官方格式时原样透传
+	custom := "integrated_multimodal_description: [Shot 1] Custom shot.\n\noverall_soundscape: Wind.\n\nnon_diegetic_music: N/A"
+	sCustom := &Shot{VideoPrompt: custom}
+	gotCustom := shotVideoPromptFor(p, sCustom, 5, false)
+	if !strings.HasSuffix(gotCustom, custom) || !strings.HasPrefix(gotCustom, "For the target video,") {
+		t.Fatalf("custom official prompt pass-through failed:\n%s", gotCustom)
+	}
+}
+
+func TestShotOpsOrphanCleanupAndWaitingPrev(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	res, _ := db.Exec(`INSERT INTO projects(title,created_at,updated_at) VALUES('剧',?,?)`, now(), now())
+	pid, _ := res.LastInsertId()
+	e, _ := insertEpisode(pid, "梗概")
+	_, _ = db.Exec(`UPDATE episodes SET script='# 标题\n## 第 1 场 · 车厢\n【画面】开场\n【卡点】悬念' WHERE id=?`, e.ID)
+	p, _ := getProject(pid)
+
+	// 添加两个镜头，第 2 镜设为 first_last
+	a1, err := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"中景","picture":"画面1","keyframe_prompt":"画面1详细提示词描述","video_prompt":"动作1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1ID := a1.(map[string]any)["shot_id"].(int64)
+	a2, err := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"after_shot_id":`+jsonInt(s1ID)+`,"duration":6,"camera":"近景","picture":"画面2","transition":"first_last","keyframe_prompt":"画面2详细提示词描述","video_prompt":"动作2"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2ID := a2.(map[string]any)["shot_id"].(int64)
+
+	// 给两镜都挂上关键帧
+	im1, _ := storeImageX(pid, e.ID, "shot", s1ID, "", makePNGBytes(32, 32, color.RGBA{10, 20, 30, 255}), "gen", "", 0, "")
+	im2, _ := storeImageX(pid, e.ID, "shot", s2ID, "", makePNGBytes(32, 32, color.RGBA{40, 50, 60, 255}), "gen", "", 0, "")
+	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im1.ID, s1ID)
+	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im2.ID, s2ID)
+
+	// 整集排队：镜1 queued，镜2 自动排为 waiting_prev（不再漏排！）
+	qOut, err := toolQueueEpisodeVideos(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	qm := qOut.(map[string]any)
+	if qm["queued"] != 2 || qm["waiting_prev"] != 1 {
+		t.Fatalf("expected queued=2 waiting_prev=1, got %+v", qm)
+	}
+
+	// 模拟镜1视频完成并有缓存尾帧 -> unlockWaitingPrev 自动把镜2推入 queued
+	v1s := listVideos(`WHERE shot_id=?`, s1ID)
+	_, _ = db.Exec(`UPDATE videos SET status='done', file='v1.mp4' WHERE id=?`, v1s[0].ID)
+	_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=?`, v1s[0].ID, s1ID)
+	_, _ = storeImageX(pid, e.ID, "lastframe", v1s[0].ID, "", makePNGBytes(32, 32, color.RGBA{90, 90, 90, 255}), "extract", "", 0, "")
+
+	if n := unlockWaitingPrev(e.ID); n != 1 {
+		t.Fatalf("expected 1 unlocked waiting_prev, got %d", n)
+	}
+	v2s := listVideos(`WHERE shot_id=?`, s2ID)
+	if v2s[0].Status != "queued" || v2s[0].ImageFile == "" {
+		t.Fatalf("waiting_prev did not unlock properly: %+v", v2s[0])
+	}
+
+	// 重排分镜：保留 ID 和媒体
+	if _, err := toolReorderShots(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"shot_ids":[`+jsonInt(s2ID)+`,`+jsonInt(s1ID)+`]}`)); err != nil {
+		t.Fatal(err)
+	}
+	reordered := listShots(e.ID, false)
+	if reordered[0].ID != s2ID || reordered[0].Chain != "off" || reordered[1].ID != s1ID {
+		t.Fatalf("reorder failed: %+v", reordered)
+	}
+
+	// 孤儿配音文件清理：save_shots 覆盖时删除旧音频文件
+	orphan := "line-orphan-test.mp3"
+	orphanPath := filepath.Join(dataDir, "audio", orphan)
+	_ = os.WriteFile(orphanPath, []byte("dummy"), 0o644)
+	_, _ = db.Exec(`INSERT INTO lines(project_id,episode_id,shot_id,sort,speaker,text,audio_file,status,created_at) VALUES(?,?,?,0,'阿策','你好',?,'done',?)`, pid, e.ID, s1ID, orphan, now())
+	_, err = toolSaveShots(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"overwrite":true,"shots":[{"duration":5,"camera":"中景","picture":"新画面","keyframe_prompt":"新画面详细关键帧描述","video_prompt":"新动作"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+		t.Fatalf("expected orphan line audio to be removed")
+	}
+	_ = p
+}
+
+func TestSubtitlesContactSheetVCOverrideAndDriveDefer(t *testing.T) {
+	// 1) 字幕按字数分配时长
+	subs := allocateNativeSubs([]parsedLine{
+		{speaker: "A", text: "好"},                 // 1 字 -> 保底 2
+		{speaker: "B", text: "今天天气真的非常好啊我们走吧"}, // 14 字
+	}, 8.0)
+	if len(subs) != 2 || subs[1].Dur <= subs[0].Dur*4 {
+		t.Fatalf("expected weighted subtitle durations, got %+v", subs)
+	}
+
+	// 2) 竖屏与横屏字号适配
+	_, _, fsPort, _ := subtitleStyle(1080, 1920)
+	_, _, fsLand, _ := subtitleStyle(1920, 1080)
+	if fsPort <= fsLand {
+		t.Fatalf("portrait fontSize (%d) should compensate for taller PlayResY vs landscape (%d)", fsPort, fsLand)
+	}
+
+	// 3) 抽帧拼图生成合法 JPEG
+	jpg, err := buildContactSheet([][]byte{
+		makePNGBytes(160, 90, color.RGBA{255, 0, 0, 255}),
+		makePNGBytes(160, 90, color.RGBA{0, 255, 0, 255}),
+		makePNGBytes(160, 90, color.RGBA{0, 0, 255, 255}),
+		makePNGBytes(160, 90, color.RGBA{255, 255, 0, 255}),
+	}, 800)
+	if err != nil || len(jpg) < 500 {
+		t.Fatalf("buildContactSheet failed: err=%v len=%d", err, len(jpg))
+	}
+
+	// 4) 变声参数三层覆盖：全局 < 角色 < 单次
+	base := defaultVCCfg()
+	steps20 := 20
+	f0On := true
+	semi := -2
+	charOv := VCOverride{DiffusionSteps: &steps20, F0: &f0On}
+	takeOv := VCOverride{SemiTone: &semi}
+	eff := base.applyOverride(charOv).applyOverride(takeOv)
+	if eff.DiffusionSteps != 20 || !eff.F0 || eff.SemiTone != -2 || eff.CfgRate != base.CfgRate {
+		t.Fatalf("vc override merge unexpected: %+v", eff)
+	}
+
+	// 5) 云盘上传空闲延期与上限
+	t0 := int64(1_000_000)
+	defer1, since1 := shouldDeferIdleStop(0, t0, true, 30*time.Minute)
+	if !defer1 || since1 != t0 {
+		t.Fatalf("should defer first time when uploading")
+	}
+	defer2, _ := shouldDeferIdleStop(since1, t0+int64(29*time.Minute/time.Millisecond), true, 30*time.Minute)
+	if !defer2 {
+		t.Fatalf("should still defer before maxExt")
+	}
+	defer3, _ := shouldDeferIdleStop(since1, t0+int64(31*time.Minute/time.Millisecond), true, 30*time.Minute)
+	if defer3 {
+		t.Fatalf("must stop deferring after maxExt")
+	}
+	defer4, since4 := shouldDeferIdleStop(since1, t0+1000, false, 30*time.Minute)
+	if defer4 || since4 != 0 {
+		t.Fatalf("must not defer when upload finished")
+	}
+}
+
+func jsonInt(v int64) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func TestMCPToolsListUniqueAndOps(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	res := mcpHandle(context.Background(), rpcReq{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/list"}, "http://test", "2025-06-18")
+	m := res.(map[string]any)["result"].(map[string]any)
+	tools := m["tools"].([]mcpTool)
+	seen := map[string]bool{}
+	for _, tl := range tools {
+		if tl.Name == "" {
+			t.Fatalf("empty tool name")
+		}
+		if seen[tl.Name] {
+			t.Fatalf("duplicate MCP tool name: %s", tl.Name)
+		}
+		seen[tl.Name] = true
+	}
+	for _, want := range []string{
+		"get_task_status", "generate_missing_keyframes", "pick_video", "cancel_video",
+		"queue_episode_videos", "build_final", "generate_cover", "list_bgm", "upload_bgm",
+		"set_episode_audio", "set_shot_sfx", "export_capcut", "add_shot", "delete_shot",
+		"reorder_shots", "set_voice_conv_override",
+	} {
+		if !seen[want] {
+			t.Fatalf("missing expected MCP tool: %s", want)
+		}
+	}
+
+	// 验证 set_voice_conv_override 与 delete_shot 预览/确认安全门
+	pr, _ := db.Exec(`INSERT INTO projects(title,created_at,updated_at) VALUES('测',?,?)`, now(), now())
+	pid, _ := pr.LastInsertId()
+	e, _ := insertEpisode(pid, "梗概")
+	aid, _ := insertAsset(pid, "character", assetDraft{Name: "小雨", Description: "短发穿大衣"})
+	ovOut, err := callVCTool(context.Background(), "set_voice_conv_override", json.RawMessage(`{"asset_id":`+jsonInt(aid)+`,"diffusion_steps":24,"f0":true,"semi_tone":-1}`), "http://test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ovOut.(map[string]any)["ok"] != true {
+		t.Fatalf("set_voice_conv_override failed: %+v", ovOut)
+	}
+	as, _ := getAsset(aid)
+	if as.VcOverride.DiffusionSteps == nil || *as.VcOverride.DiffusionSteps != 24 || as.VcOverride.SemiTone == nil || *as.VcOverride.SemiTone != -1 {
+		t.Fatalf("vc_override not saved: %+v", as.VcOverride)
+	}
+
+	addOut, err := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"近景","picture":"画面","keyframe_prompt":"详细关键帧提示词内容","video_prompt":"动作"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := addOut.(map[string]any)["shot_id"].(int64)
+	prevDel, err := toolDeleteShot(context.Background(), json.RawMessage(`{"shot_id":`+jsonInt(sid)+`}`))
+	if err != nil || prevDel.(map[string]any)["ok"] != false {
+		t.Fatalf("delete_shot without confirm should preview: err=%v out=%+v", err, prevDel)
+	}
+	doDel, err := toolDeleteShot(context.Background(), json.RawMessage(`{"shot_id":`+jsonInt(sid)+`,"confirm":true}`))
+	if err != nil || doDel.(map[string]any)["ok"] != true {
+		t.Fatalf("delete_shot with confirm failed: err=%v out=%+v", err, doDel)
+	}
+	if len(listShots(e.ID, false)) != 0 {
+		t.Fatalf("shot was not deleted")
+	}
+}
