@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, type Channel } from './api'
 
-export type Page = 'projects' | 'series' | 'project' | 'studio' | 'compute' | 'channels' | 'api'
+export type Page = 'projects' | 'series' | 'project' | 'studio' | 'voices' | 'compute' | 'channels' | 'api'
 export interface Route { page: Page; id?: number; ep?: number; step?: number; tab?: string }
 
 export function parseRoute(p: string): Route {
@@ -10,6 +10,7 @@ export function parseRoute(p: string): Route {
   const m = p.match(/^\/p\/(\d+)(?:\/(\w+))?/)
   if (m) return { page: 'series', id: Number(m[1]), tab: m[2] || undefined }
   if (p.startsWith('/studio')) return { page: 'studio' }
+  if (p.startsWith('/voices')) return { page: 'voices' }
   if (p.startsWith('/compute')) return { page: 'compute' }
   if (p.startsWith('/channels')) return { page: 'channels' }
   if (p.startsWith('/api')) return { page: 'api' }
@@ -21,6 +22,7 @@ export function routePath(r: Route): string {
     case 'project': return `/p/${r.id}/e/${r.ep}${r.step ? '/' + r.step : ''}`
     case 'series': return `/p/${r.id}${r.tab ? '/' + r.tab : ''}`
     case 'studio': return '/studio'
+    case 'voices': return '/voices'
     case 'compute': return '/compute'
     case 'channels': return '/channels'
     case 'api': return '/api'

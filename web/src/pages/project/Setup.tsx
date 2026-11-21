@@ -5,7 +5,7 @@ import { useProject, StepHead, Cost } from '../Project'
 import { useStore } from '../../store'
 import { Segmented, Select, Spinner, Stepper } from '../../components/ui'
 import { StylePicker, kindOptions, animeStyles, realStyles } from '../Projects'
-import { VoiceButton } from './Voice'
+import { LibSaveBtn, VoiceButton } from './Voice'
 
 export default function Setup() {
   const { data, patch, patchEp, goStep, task, run } = useProject()
@@ -95,7 +95,8 @@ export default function Setup() {
                   onChange={x => setF({ ...f, orig_volume: Number(x.target.value) / 100 })} onBlur={() => save('orig_volume', f.orig_volume)} /><span>%</span></div>
               </div>
               <div className="field field-row"><span className="field-label">旁白音色</span>
-                <VoiceButton value={p.narrator_voice} name="旁白" onSave={v => patch({ narrator_voice: v })} icon={<Mic2 size={14} />} />
+                <VoiceButton value={p.narrator_voice} name="旁白" projectId={p.id} onApplied={() => run(async () => {}, '已换成音色库的音色')} onSave={v => patch({ narrator_voice: v })} icon={<Mic2 size={14} />} />
+                {!!p.narrator_voice?.mode && <LibSaveBtn name={`${p.title}的旁白`} body={{ project_id: p.id }} />}
               </div>
             </>}
             <div className="field"><span className="field-label">交付画质</span>

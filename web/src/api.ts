@@ -25,6 +25,14 @@ export interface VoiceSpec {
   channel_id?: number; mode?: 'fish' | 'builtin' | 'design' | 'clone' | 'openai'; voice?: string; title?: string; desc?: string
   sample?: string; sample_text?: string; cover?: string; preview?: string; speed?: number; pitch?: number; style?: string
 }
+export interface LibVoiceRef { sample: string; source: string; duration: number; shot_id?: number; start?: number; end?: number }
+export interface LibVoice {
+  id: number; name: string; description: string; tags: string[]; gender: string; age: string
+  source: 'design' | 'clone' | 'fish' | 'builtin' | 'openai' | string; voice: VoiceSpec
+  channel_id: number; mode: string; voice_id: string; sample: string; synth_channel_id: number; speed: number; pitch: number; fish_model_id: string
+  preview: string; voice_refs: LibVoiceRef[]; favorite: boolean; origin_project_id: number; origin_asset_id: number; origin: string
+  created_at: number; updated_at: number; sample_url: string; preview_url: string; ref_urls: string[]
+}
 export interface Project {
   id: number; title: string; idea: string; style: string; kind: string; aspect: string; episode_sec: number; shot_target: number
   text_channel_id: number; text_model: string; image_channel_id: number; image_model: string

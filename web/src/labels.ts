@@ -126,7 +126,8 @@ export const pipeStatusNames: Record<string, string> = {
 }
 export const chainNames: Record<string, string> = { off: '不衔接', ref: '参考上一镜', first: '首尾帧' }
 export const voiceTypeNames: Record<string, string> = { fish: 'Fish Audio', mimo: '小米 MiMo', openai: 'OpenAI 兼容' }
-export const voiceModeNames: Record<string, string> = { fish: '音色库', builtin: '内置音色', design: '设计音色', clone: '克隆音色', openai: '渠道音色' }
+export const voiceModeNames: Record<string, string> = { fish: 'Fish 音色', builtin: '内置音色', design: '设计音色', clone: '克隆音色', openai: '渠道音色' }
+export const voiceSourceNames: Record<string, string> = { design: '设计', clone: '克隆', fish: 'Fish', builtin: '内置', openai: '渠道' }
 export const tagNames: Record<string, string> = { '': '设定图', sheet: '三视图', expr: '表情表', ref: '参考图' }
 
 export function voiceLabel(v?: { mode?: string; title?: string; voice?: string }) {

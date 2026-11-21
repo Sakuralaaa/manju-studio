@@ -984,7 +984,7 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 	case "ping":
 		return ok(map[string]any{})
 	case "tools/list":
-		return ok(map[string]any{"tools": append(append(append([]mcpTool{}, writerTools...), moreTools...), mcpTools...)})
+		return ok(map[string]any{"tools": append(append(append(append([]mcpTool{}, writerTools...), moreTools...), libTools...), mcpTools...)})
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -999,6 +999,9 @@ func mcpHandle(ctx context.Context, q rpcReq, base, pv string) any {
 		v, err := callWriterTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
 		if errors.Is(err, errUnknownTool) {
 			v, err = callMoreTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
+		}
+		if errors.Is(err, errUnknownTool) {
+			v, err = callLibTool(ctx, p.Name, p.Arguments, base, pv != "2024-11-05")
 		}
 		if errors.Is(err, errUnknownTool) {
 			v, err = callTool(ctx, p.Name, p.Arguments, base)

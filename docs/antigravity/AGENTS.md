@@ -56,6 +56,7 @@
 
 - `design_voice` 返回的候选带音频内容块，可以直接听；之后再听用 `listen_voice`（`sample`，或 `asset_id` 听角色当前音色和原声参考）。选定用 `set_voice`。
 - 用片子里的原声做角色音色：`clone_voice`（`asset_id` + `source_shot_id`，用 `start` / `end` 秒截一段只有这个角色说话的片段，10 秒以上最好）。视频原声里的背景音乐、环境声不会在服务器上去除，先 `listen_voice` 听样本是否干净；不干净就换一段，或处理干净后用 `audio_base64` 传。克隆会直接改角色音色（`bind=false` 只存参考）。
+- 音色库（跨作品复用）：先 `list_voice_library`（可 `query`、`favorites_only`）看有没有合适的，`listen_voice`（`library_id`）听，合适就 `apply_library_voice`（`library_id` + `asset_id`，旁白用 `project_id`）。好用的音色用 `save_voice_to_library` 收藏：`asset_id`（角色当前音色）、`sample` + `channel_id`（design_voice 候选）、`project_id`（旁白）或 `fish_voice_id`，顺手写 `tags` / `gender` / `age` 方便以后搜；`clone_voice` 可传 `save_to_library=true`。`delete_library_voice` 不可恢复：先不带 `confirm` 调一次告诉用户，同意后再传 `confirm=true`。
 
 ## 分镜要求
 

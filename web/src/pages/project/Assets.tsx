@@ -6,7 +6,7 @@ import { Empty, Modal, Segmented, Select, Spinner, useMedia } from '../../compon
 import { ImageLibrary, ModelSelect, UploadPick } from '../../components/imgtools'
 import { kindLabels, tagNames } from '../../labels'
 import { Picker, UploadBtn } from './media'
-import { VoiceButton } from './Voice'
+import { LibSaveBtn, VoiceButton } from './Voice'
 
 const kindIcon = { character: UserRound, scene: Mountain, prop: Box }
 
@@ -127,7 +127,7 @@ function AssetCard({ a, base, aspect, onEdit, onVariant }: { a: Asset; base?: As
           <Picker images={ims} picked={picked} aspect={aspect} busy={busy} empty={<span>{tag && !a.picked_image_id ? '先选定设定图' : '未生成'}</span>} />
         </div>
       )}
-      {tag !== 'ref' && (isChar ? <VoiceButton value={a.voice || {}} name={a.name} assetId={a.id} onSave={saveVoice} /> : <p className="acard-desc" data-clamp title={a.description}>{a.description || '没有描述'}</p>)}
+      {tag !== 'ref' && (isChar ? <div className="vrow"><VoiceButton value={a.voice || {}} name={a.name} assetId={a.id} onSave={saveVoice} onApplied={() => run(async () => {}, '已换成音色库的音色')} />{!!a.voice?.mode && <LibSaveBtn name={`${a.name}的声音`} body={{ asset_id: a.id }} />}</div> : <p className="acard-desc" data-clamp title={a.description}>{a.description || '没有描述'}</p>)}
       <div className="acard-foot">
         {tag === 'ref' ? <>
           <button className="btn btn-secondary btn-sm" onClick={() => setLib(true)}><Images size={14} />从图库选</button>

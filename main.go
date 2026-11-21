@@ -21,7 +21,7 @@ import (
 var webFS embed.FS
 
 var (
-	version   = "0.2.9"
+	version   = "0.2.10"
 	dataDir   string
 	adminPass string
 	secret    []byte
@@ -156,6 +156,11 @@ func routes(m *http.ServeMux) {
 	a("POST /api/voice/fish", handleFishCreate)
 	a("PUT /api/voice/fish/{mid}", handleFishUpdate)
 	a("DELETE /api/voice/fish/{mid}", handleFishDelete)
+	a("GET /api/voice/library", handleLibList)
+	a("POST /api/voice/library", handleLibSave)
+	a("PUT /api/voice/library/{id}", handleLibUpdate)
+	a("DELETE /api/voice/library/{id}", handleLibDelete)
+	a("POST /api/voice/library/{id}/apply", handleLibApply)
 	a("GET /api/bgm", handleBgmList)
 	a("POST /api/bgm", handleBgmUpload)
 	a("DELETE /api/bgm/{id}", handleBgmDelete)

@@ -1,12 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Pencil, Plus, Search, Sparkles, Trash2, Upload, Wand2, AudioLines } from 'lucide-react'
-import { api, upload, type Channel, type FishItem, type VoiceSpec } from '../../api'
+import { Check, Pencil, Plus, Search, Sparkles, Star, Trash2, Upload, Wand2, AudioLines, Library } from 'lucide-react'
+import { api, upload, type Channel, type FishItem, type LibVoice, type VoiceSpec } from '../../api'
 import { useStore } from '../../store'
 import { Empty, Modal, Segmented, Select, Spinner, useMedia } from '../../components/ui'
 import { PlayBtn, Recorder } from '../../components/audio'
-import { voiceLabel, voiceModeNames } from '../../labels'
+import { voiceLabel, voiceModeNames, voiceSourceNames } from '../../labels'
 
-export function VoiceButton({ value, name, onSave, assetId, icon }: { value: VoiceSpec; name: string; onSave: (v: VoiceSpec) => Promise<any> | void; assetId?: number; icon?: React.ReactNode }) {
+// LibSaveBtn 「收藏到音色库」：body 是 POST /api/voice/library 的请求（asset_id / sample + channel_id / project_id / voice）
+export function LibSaveBtn({ body, name, label, disabled }: { body: Record<string, any>; name?: string; label?: string; disabled?: boolean }) {
+  const { toast } = useStore()
+  const [busy, setBusy] = useState(false)
+  const save = async () => {
+    const n = prompt('收藏到音色库，名称', name || '')
+    if (n === null) return
+    setBusy(true)
+    try {
+      const r = await api<{ item: LibVoice; exists: boolean }>('/api/voice/library', { body: { ...body, name: n.trim() || undefined } })
+      toast(r.exists ? `「${r.item.name}」已经在音色库里` : '已收藏到音色库')
+    } catch (e: any) { toast(e.message, 'err') } finally { setBusy(false) }
+  }
+  if (label) return <button type="button" className="btn btn-secondary" disabled={disabled || busy} onClick={save}>{busy ? <Spinner /> : <Star size={16} />}{label}</button>
+  return <button type="button" className="icon-btn sm" disabled={disabled || busy} onClick={save} aria-label="收藏到音色库" title="收藏到音色库">{busy ? <Spinner size={13} /> : <Star size={14} />}</button>
+}
+
+export function VoiceButton({ value, name, onSave, assetId, projectId, onApplied, icon }: { value: VoiceSpec; name: string; onSave: (v: VoiceSpec) => Promise<any> | void; assetId?: number; projectId?: number; onApplied?: () => void; icon?: React.ReactNode }) {
   const [open, setOpen] = useState(false)
   const label = voiceLabel(value)
   return (
@@ -14,23 +31,25 @@ export function VoiceButton({ value, name, onSave, assetId, icon }: { value: Voi
       <button type="button" className={`vbtn ${label ? 'is-set' : ''}`} onClick={() => setOpen(true)} title={label || '设置音色'}>
         {icon || <AudioLines size={14} />}<span>{label || '设置音色'}</span>
       </button>
-      {open && <VoicePanel value={value} name={name} assetId={assetId} onClose={() => setOpen(false)} onSave={async v => { await onSave(v); setOpen(false) }} />}
+      {open && <VoicePanel value={value} name={name} assetId={assetId} projectId={projectId} onApplied={() => { setOpen(false); onApplied?.() }} onClose={() => setOpen(false)} onSave={async v => { await onSave(v); setOpen(false) }} />}
     </>
   )
 }
 
-type Tab = 'design' | 'fish' | 'clone' | 'builtin' | 'openai'
+type Tab = 'library' | 'design' | 'fish' | 'clone' | 'builtin' | 'openai'
 
-export function VoicePanel({ value, name, assetId, onClose, onSave }: { value: VoiceSpec; name: string; assetId?: number; onClose: () => void; onSave: (v: VoiceSpec) => void }) {
+export function VoicePanel({ value, name, assetId, projectId, onApplied, onClose, onSave }: { value: VoiceSpec; name: string; assetId?: number; projectId?: number; onApplied?: () => void; onClose: () => void; onSave: (v: VoiceSpec) => void }) {
   const { channels, go, toast } = useStore()
   const vchs = channels.filter(c => c.kind === 'voice')
   const mimo = vchs.filter(c => c.api_type === 'mimo')
   const fish = vchs.filter(c => c.api_type === 'fish')
   const oai = vchs.filter(c => c.api_type === 'openai')
   const narrow = useMedia('(max-width: 720px)')
+  const target = assetId ? { asset_id: assetId } : projectId ? { project_id: projectId } : null
   const tabs = ([
     { value: 'design', label: narrow ? '设计' : '设计音色', ok: mimo.length + fish.length > 0 },
-    { value: 'fish', label: '音色库', ok: fish.length > 0 },
+    { value: 'library', label: narrow ? '音色库' : '从音色库选', ok: !!target },
+    { value: 'fish', label: narrow ? 'Fish' : 'Fish 音色', ok: fish.length > 0 },
     { value: 'clone', label: narrow ? '克隆' : '克隆音色', ok: mimo.length + fish.length > 0 },
     { value: 'builtin', label: narrow ? '内置' : '内置音色', ok: mimo.length > 0 },
     { value: 'openai', label: narrow ? '渠道' : '渠道音色', ok: oai.length > 0 },
@@ -60,11 +79,13 @@ export function VoicePanel({ value, name, assetId, onClose, onSave }: { value: V
       footer={<>
         <div className="vcur"><span className="muted">当前</span><b title={voiceLabel(v)}>{!ready ? '未选择' : v.title || v.voice ? `${voiceModeNames[v.mode!]} · ${v.title || v.voice}` : voiceModeNames[v.mode!]}</b></div>
         <span className="grow" />
+        <LibSaveBtn label={narrow ? '收藏' : '收藏到音色库'} disabled={!ready} name={v.title || `${name}的声音`} body={{ voice: { ...v, sample_text: text }, ...(target || {}) }} />
         <button className="btn btn-secondary" disabled={!ready || pv.busy} onClick={preview}>{pv.busy ? <Spinner /> : <AudioLines size={16} />}试听</button>
         <button className="btn btn-primary" disabled={!ready} onClick={() => onSave({ ...v, sample_text: text })}><Check size={16} />保存</button>
       </>}>
       <Segmented value={tab} onChange={x => setTab(x as Tab)} options={tabs.map(t => ({ value: t.value, label: t.label }))} />
       <div className="vbody">
+        {tab === 'library' && target && <LibraryTab target={target} onApplied={() => onApplied?.()} />}
         {tab === 'design' && <DesignTab chs={[...mimo, ...fish]} name={name} assetId={assetId} v={v} setV={setV} text={text} setText={setText} />}
         {tab === 'fish' && <FishTab chs={fish} v={v} setV={setV} />}
         {tab === 'clone' && <CloneTab chs={[...mimo, ...fish]} name={name} v={v} setV={setV} />}
@@ -140,7 +161,9 @@ function DesignTab({ chs, name, assetId, v, setV, text, setText }: { chs: Channe
             const on = v.mode === 'design' && v.sample === c.sample
             return (
               <button key={c.sample} type="button" className={`vcand ${on ? 'is-on' : ''}`} onClick={() => setV({ ...v, channel_id: ch, mode: 'design', sample: c.sample, desc, voice: '', title: `${name}的声音`, sample_text: text })}>
-                <PlayBtn src={c.url} /><span>候选 {i + 1}</span><span className="muted">{c.duration.toFixed(1)} 秒</span><span className="grow" />{on ? <Check size={14} /> : <span className="vpick">选用</span>}
+                <PlayBtn src={c.url} /><span>候选 {i + 1}</span><span className="muted">{c.duration.toFixed(1)} 秒</span><span className="grow" />
+                <span onClick={e => e.stopPropagation()}><LibSaveBtn name={`${name}的声音 · 候选 ${i + 1}`} body={{ sample: c.sample, channel_id: ch, description: desc, ...(assetId ? { asset_id: assetId } : {}) }} /></span>
+                {on ? <Check size={14} /> : <span className="vpick">选用</span>}
               </button>
             )
           })}
@@ -201,6 +224,7 @@ function FishTab({ chs, v, setV }: { chs: Channel[]; v: VoiceSpec; setV: (v: Voi
                 </div>
                 <span onClick={e => e.stopPropagation()} className="fact">
                   <PlayBtn src={it.sample} />
+                  <LibSaveBtn name={it.title} body={{ voice: { channel_id: ch, mode: 'fish', voice: it.id, title: it.title, cover: it.cover, preview: it.sample, speed: 1 }, description: it.desc, tags: it.tags }} />
                   {it.mine && <button className="icon-btn sm" onClick={() => rename(it)} aria-label="改名" title="改名"><Pencil size={13} /></button>}
                   {it.mine && <button className="icon-btn sm is-danger" onClick={() => del(it)} aria-label="删除" title="删除"><Trash2 size={13} /></button>}
                 </span>
@@ -211,6 +235,52 @@ function FishTab({ chs, v, setV }: { chs: Channel[]; v: VoiceSpec; setV: (v: Voi
       )}
       {more && items && items.length > 0 && <button className="btn btn-ghost btn-sm vmore" onClick={() => load(page + 1, true)}>加载更多</button>}
       {creating && <FishCreate ch={ch!} onClose={() => setCreating(false)} onCreated={it => { setCreating(false); setV({ ...v, channel_id: ch, mode: 'fish', voice: it.id, title: it.title, sample: '' }); setScope('mine'); load(1) }} />}
+    </div>
+  )
+}
+
+function LibraryTab({ target, onApplied }: { target: { asset_id?: number; project_id?: number }; onApplied: () => void }) {
+  const { toast, go } = useStore()
+  const [q, setQ] = useState('')
+  const [fav, setFav] = useState(false)
+  const [items, setItems] = useState<LibVoice[] | null>(null)
+  const [busy, setBusy] = useState(0)
+  const load = async () => {
+    try { const r = await api<{ items: LibVoice[] }>(`/api/voice/library?q=${encodeURIComponent(q)}${fav ? '&fav=1' : ''}`); setItems(r.items) } catch (e: any) { toast(e.message, 'err'); setItems([]) }
+  }
+  useEffect(() => { load() }, [fav])
+  const apply = async (l: LibVoice) => {
+    setBusy(l.id)
+    try {
+      const r = await api<{ warnings?: string[] }>(`/api/voice/library/${l.id}/apply`, { body: target })
+      toast(`已用「${l.name}」`)
+      r.warnings?.forEach(w => toast(w, 'info'))
+      onApplied()
+    } catch (e: any) { toast(e.message, 'err') } finally { setBusy(0) }
+  }
+  return (
+    <div className="stack">
+      <div className="vtool">
+        <Segmented block={false} size="sm" value={fav ? 'fav' : 'all'} onChange={x => setFav(x === 'fav')} options={[{ value: 'all', label: '全部' }, { value: 'fav', label: '星标' }]} />
+        <div className="search vsearch"><Search size={14} /><input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === 'Enter' && load()} placeholder="搜索名称、标签" /></div>
+        <button className="btn btn-ghost btn-sm" onClick={() => go({ page: 'voices' })}><Library size={14} />管理音色库</button>
+      </div>
+      {!items ? <div className="loading"><Spinner /></div> : items.length === 0 ? <div className="vempty">{q || fav ? '没有找到' : '音色库还是空的：在设计候选、Fish 音色或角色音色旁点星标收藏'}</div> : (
+        <div className="fgrid">
+          {items.map(l => (
+            <div key={l.id} className="fitem" onClick={() => busy === 0 && apply(l)} title={l.description || l.name}>
+              <div className="fmain">
+                <b>{l.favorite && <Star size={11} className="lib-star" />}{l.name}</b>
+                <span className="muted">{[voiceSourceNames[l.source] || l.source, l.gender, l.age, ...l.tags].filter(Boolean).join(' · ')}</span>
+              </div>
+              <span onClick={e => e.stopPropagation()} className="fact">
+                <PlayBtn src={l.sample_url || l.preview_url || undefined} />
+                <button className="btn btn-secondary btn-sm" disabled={busy !== 0} onClick={() => apply(l)}>{busy === l.id ? <Spinner size={13} /> : null}使用</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

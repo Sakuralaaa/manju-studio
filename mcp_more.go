@@ -1,6 +1,6 @@
 package main
 
-// MCP 补充工具（0.2.9）：单镜头改分镜、看任意图、听音色候选、建 / 改作品、删资产、从资产拿掉图、
+// MCP 补充工具（0.2.9；0.2.10 起 listen_voice 支持 library_id、clone_voice 可顺手收进音色库）：单镜头改分镜、看任意图、听音色候选、建 / 改作品、删资产、从资产拿掉图、
 // 用镜头原声（或上传音频）克隆角色音色。
 
 import (
@@ -70,9 +70,9 @@ var moreTools = []mcpTool{
 		"image_id": num("图片编号"), "image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "多张图片编号，最多 8 张"},
 		"original": boolp("返回原图"), "max_edge": num("缩放后的长边像素，256–4096，默认 1536"),
 	})},
-	{"listen_voice", "听音色：返回 MCP 音频内容块。给 sample（design_voice 的候选样本名，可多个）直接听；给 asset_id 听角色当前音色的样本和 clone_voice 存下的原声参考；给 project_id 听旁白音色样本。没有本地样本的音色（Fish 音色库 / 内置音色）请用 tts 合成一句试听。", obj(map[string]any{
+	{"listen_voice", "听音色：返回 MCP 音频内容块。给 sample（design_voice 的候选样本名，可多个）直接听；给 asset_id 听角色当前音色的样本和 clone_voice 存下的原声参考；给 project_id 听旁白音色样本；给 library_id 听音色库里的音色（样本、试听、原声参考）。没有本地样本的音色（Fish 音色 / 内置音色）请用 tts 合成一句试听。", obj(map[string]any{
 		"sample": str("样本名"), "samples": arr("多个样本名", map[string]any{"type": "string"}),
-		"asset_id": num("角色资产编号"), "project_id": num("作品编号（听旁白音色）"), "limit": num("最多几段，1–6，默认 4"),
+		"asset_id": num("角色资产编号"), "library_id": num("音色库编号（list_voice_library）"), "project_id": num("作品编号（听旁白音色）"), "limit": num("最多几段，1–6，默认 4"),
 	})},
 	{"create_project", "新建作品（剧集），同时建好第 1 集。只有 title 必填，其余设置不填用默认（9:16、漫剧、原声）。", obj(projectProps(), "title")},
 	{"update_project", "改作品设置：只改给出的字段。改画幅 / 画风不会重做已有的图和视频；audio_mode 从 native 改成 dub 后需要 generate_dub 生成配音。", obj(withKey(projectProps(), "project_id", num("作品编号")), "project_id")},
@@ -89,6 +89,7 @@ var moreTools = []mcpTool{
 		"channel_id":  num("语音渠道编号（可选）：不填时角色当前用 Fish 就用 Fish，否则用小米 MiMo"),
 		"sample_text": str("这段音频里说的话（可选，Fish 建音色时用；不填且没截取时取这个镜头里该角色的台词）"),
 		"description": str("音色描述（可选，记下来）"), "bind": boolp("设为角色音色，默认 true；false = 只存进原声参考"),
+		"save_to_library": boolp("同时收进音色库（跨作品复用），默认 false"), "library_name": str("收进音色库时的名称（可选）"),
 	}, "asset_id")},
 }
 
@@ -471,6 +472,7 @@ type listenVoiceArgs struct {
 	Samples   []string `json:"samples"`
 	AssetID   int64    `json:"asset_id"`
 	ProjectID int64    `json:"project_id"`
+	LibraryID int64    `json:"library_id"`
 	Limit     int      `json:"limit"`
 }
 
@@ -489,6 +491,28 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 	}
 	info := map[string]any{}
 	switch {
+	case a.LibraryID > 0:
+		l, err := getLibVoice(a.LibraryID)
+		if err != nil {
+			return nil, err
+		}
+		head = fmt.Sprintf("音色库 #%d「%s」（%s）", l.ID, l.Name, orDefault(l.Source, l.Mode))
+		info["library"] = libBrief(l, base)
+		info["voice"] = l.Voice
+		if l.Sample != "" {
+			list = append(list, item{l.Sample, "音色样本"})
+		}
+		if l.Preview != "" {
+			list = append(list, item{l.Preview, "试听"})
+		}
+		for _, r := range l.Refs {
+			if r.Sample != l.Sample {
+				list = append(list, item{r.Sample, fmt.Sprintf("原声参考 %.1f 秒", r.Duration)})
+			}
+		}
+		if l.Sample == "" && l.Preview == "" {
+			head += "：没有本地样本，用 tts（voice = 上面的 voice 对象）合成一句试听"
+		}
 	case a.AssetID > 0:
 		as, err := getAsset(a.AssetID)
 		if err != nil || as.Kind != "character" {
@@ -532,7 +556,7 @@ func toolListenVoice(ctx context.Context, raw json.RawMessage, base string, audi
 		if head != "" {
 			return &mcpRich{Blocks: []any{textBlock(head)}, Structured: info}, nil
 		}
-		return nil, errors.New("需要 sample / samples、asset_id 或 project_id")
+		return nil, errors.New("需要 sample / samples、asset_id、project_id 或 library_id")
 	}
 	limit := clampInt(a.Limit, 1, 6)
 	if a.Limit == 0 {
@@ -858,6 +882,8 @@ type cloneArgs struct {
 	SampleText  string   `json:"sample_text"`
 	Description string   `json:"description"`
 	Bind        *bool    `json:"bind"`
+	SaveLib     bool     `json:"save_to_library"`
+	LibName     string   `json:"library_name"`
 }
 
 const cloneMaxSec = 60.0
@@ -1111,6 +1137,17 @@ func toolCloneVoice(ctx context.Context, raw json.RawMessage, base string, audio
 		out["next"] = "已设为角色音色：之后配音都用它。用 tts（asset_id）念一句试听，或 generate_dub 重做配音（force=true）。"
 	} else {
 		out["next"] = "只存进了原声参考，没改角色音色；要用它请再调用并 bind=true。"
+	}
+	if a.SaveLib {
+		c, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		l, exists, err := saveLibVoice(c, libSaveIn{Voice: &spec, AssetID: as.ID, Name: strings.TrimSpace(a.LibName), Source: "clone"}, []VoiceRef{ref})
+		cancel()
+		if err != nil {
+			warn = append(warn, "收进音色库失败："+err.Error())
+			out["warnings"] = nonNil(warn)
+		} else {
+			out["library_id"], out["library_exists"] = l.ID, exists
+		}
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	blocks := []any{textBlock(string(b))}
