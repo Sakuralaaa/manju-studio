@@ -103,6 +103,8 @@ description: 漫剧工坊外部编剧规则
 | `get_audio_link` | 音频的限时下载地址（2 小时，不需要密钥）+ 文件名、时长、念的文字：`sample(s)`、`asset_id`（`which` = `sample` / `refs` / `master` / `candidates`，默认全部）、`project_id`（旁白）、`library_id`、`line_id` |
 | `export_voice_candidates` | `project_id`（可选 `asset_ids`）：把各角色的设计候选、当前音色、原声参考、母带（和旁白）打成一个 zip，返回一个限时下载地址；包内文件名全是 ASCII（`C01_asset10_cand1_vd-xxx.wav`），附 `manifest.txt` / `manifest.json`（文件 → 角色、候选序号、原始样本名、时长、文字、是否当前绑定） |
 
+0.2.14：**0.2.13 细节修复**：空闲暂缓关机期间云盘状态轮询节流为每 30 秒且关机前跳过已回收运行时；网页端完整适配 `waiting_prev` 显示与取消；`upsert_asset` 局部更新 `look` 时自动保留未传字段与原 `description`；删镜 / 排镜 / 改衔接后自动清理失效 `waiting_prev` 并即时解锁满足条件的镜头；配饰写「无 / 无配饰」不再拼成「戴无」；Colab 状态文件改原子替换写入。
+
 0.2.13：**Agent 全链路闭环、角色一致性、H3 官方提示词与稳定性优化**。
 - **上传与异步生图**：新增 `POST /v1/uploads`（直传大图/音频拿 `upload_id`，免 base64，`upload_image`、`clone_voice`、`video_submit`、`upload_bgm` 均支持）；`image_generate` / `generate_keyframe` 新增 `wait=false` 异步返回 `task_id`，新增 `get_task_status` 与 `generate_missing_keyframes` 批量补关键帧。
 - **角色外观一致**：角色 `look` 结构化存入 `assets.look_json`（不与简介重复拼接），外观抽取按小句切分、按词匹配，避免性格/心理描写混入外观或 320 字截断；禁用项放 `look.avoid` 单独约束，不把否定词拼进正面描述。

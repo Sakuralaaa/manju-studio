@@ -453,3 +453,90 @@ func TestMCPToolsListUniqueAndOps(t *testing.T) {
 		t.Fatalf("shot was not deleted")
 	}
 }
+
+func TestV0214BugFixes(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	// 1) consistency.go: 「无 / 无配饰」不拼出「戴无」，「穿过人群」不混入外观
+	l := AssetLook{Hair: "黑色短发", Outfit: "深蓝外套", Accessories: "无配饰"}
+	fp := l.formatPositive()
+	if strings.Contains(fp, "戴无") || strings.Contains(fp, "无配饰") {
+		t.Fatalf("unexpected negative accessory in formatPositive: %s", fp)
+	}
+	sents := appearanceSentences("穿过人群寻找线索，穿深色风衣", "阿策")
+	for _, s := range sents {
+		if strings.Contains(s, "穿过人群") {
+			t.Fatalf("non-clothing verb leaked into appearance: %v", sents)
+		}
+	}
+
+	// 2) upsert_asset 局部更新 look 时合并旧字段、不覆盖 description，且已有 look 允许只更新 description
+	pr, _ := db.Exec(`INSERT INTO projects(title,created_at,updated_at) VALUES('合并测',?,?)`, now(), now())
+	pid, _ := pr.LastInsertId()
+	r1, err := toolUpsertAsset(context.Background(), json.RawMessage(`{"project_id":`+jsonInt(pid)+`,"kind":"character","name":"林夏","description":"冷静沉稳的调查记者","look":{"hair":"黑色齐肩短发","outfit":"卡其色风衣"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aid := r1.(map[string]any)["asset_id"].(int64)
+	// 仅追加 avoid，不得清空 hair / outfit，也不得覆写 description
+	if _, err := toolUpsertAsset(context.Background(), json.RawMessage(`{"asset_id":`+jsonInt(aid)+`,"look":{"avoid":["帽子"]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := getAsset(aid)
+	if a.Look.Hair != "黑色齐肩短发" || a.Look.Outfit != "卡其色风衣" || len(a.Look.Avoid) != 1 || a.Look.Avoid[0] != "帽子" {
+		t.Fatalf("partial look update clobbered fields: %+v", a.Look)
+	}
+	if a.Description != "冷静沉稳的调查记者" {
+		t.Fatalf("partial look update clobbered description: %q", a.Description)
+	}
+	// 已有 look 时，仅更新性格 description 不应被误拒
+	if _, err := toolUpsertAsset(context.Background(), json.RawMessage(`{"asset_id":`+jsonInt(aid)+`,"description":"性格执拗，内心藏着旧案秘密"}`)); err != nil {
+		t.Fatalf("updating description when look_json already exists should succeed: %v", err)
+	}
+
+	// 3) 删第 1 镜时，原第 2 镜自动重置 chain='off' 且失效 waiting_prev 自动取消；重排后移到已完成镜后立刻解锁
+	e, _ := insertEpisode(pid, "梗概")
+	a1, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"中景","picture":"镜1","keyframe_prompt":"镜1详细关键帧描述","video_prompt":"动作1"}`))
+	a2, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"近景","picture":"镜2","transition":"first_last","keyframe_prompt":"镜2详细关键帧描述","video_prompt":"动作2"}`))
+	a3, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"特写","picture":"镜3","transition":"first_last","keyframe_prompt":"镜3详细关键帧描述","video_prompt":"动作3"}`))
+	s1 := a1.(map[string]any)["shot_id"].(int64)
+	s2 := a2.(map[string]any)["shot_id"].(int64)
+	s3 := a3.(map[string]any)["shot_id"].(int64)
+	for _, sid := range []int64{s1, s2, s3} {
+		im, _ := storeImageX(pid, e.ID, "shot", sid, "", makePNGBytes(32, 32, color.RGBA{20, 40, 60, 255}), "gen", "", 0, "")
+		_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im.ID, sid)
+	}
+	if _, err := toolQueueEpisodeVideos(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`}`)); err != nil {
+		t.Fatal(err)
+	}
+	// 删除第 1 镜 -> s2 变成新第 1 镜，chain 归 off，s2 的 waiting_prev 视频自动取消；s3 仍在 s2 后保持 waiting_prev
+	if _, err := toolDeleteShot(context.Background(), json.RawMessage(`{"shot_id":`+jsonInt(s1)+`,"confirm":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	s2Row, _ := getShot(s2)
+	if s2Row.Chain != "off" {
+		t.Fatalf("new first shot should have chain='off', got %q", s2Row.Chain)
+	}
+	v2s := listVideos(`WHERE shot_id=?`, s2)
+	if len(v2s) != 1 || v2s[0].Status != "canceled" {
+		t.Fatalf("orphaned waiting_prev on new first shot should be canceled, got %+v", v2s)
+	}
+	// 新增一个已完成的镜头 s4，把 s3 排到 s4 后面 -> reorder_shots 立刻解锁 s3 的 waiting_prev
+	a4, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":5,"camera":"全景","picture":"镜4","keyframe_prompt":"镜4详细关键帧描述","video_prompt":"动作4"}`))
+	s4 := a4.(map[string]any)["shot_id"].(int64)
+	v4id, _ := enqueueVideo(videoIn{ProjectID: pid, EpisodeID: e.ID, ShotID: s4, Source: "project", Prompt: "p4", ImageFile: "x.png", Seconds: 5})
+	_, _ = db.Exec(`UPDATE videos SET status='done', file='v4.mp4' WHERE id=?`, v4id)
+	_, _ = db.Exec(`UPDATE shots SET picked_video_id=? WHERE id=?`, v4id, s4)
+	_, _ = storeImageX(pid, e.ID, "lastframe", v4id, "", makePNGBytes(32, 32, color.RGBA{80, 80, 80, 255}), "extract", "", 0, "")
+	ro, err := toolReorderShots(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"shot_ids":[`+jsonInt(s2)+`,`+jsonInt(s4)+`,`+jsonInt(s3)+`]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro.(map[string]any)["unlocked_waiting_prev"] != 1 {
+		t.Fatalf("expected reorder_shots to unlock s3 immediately, got %+v", ro)
+	}
+	v3s := listVideos(`WHERE shot_id=?`, s3)
+	if len(v3s) != 1 || v3s[0].Status != "queued" || v3s[0].ImageFile == "" {
+		t.Fatalf("s3 waiting_prev not unlocked after reorder: %+v", v3s)
+	}
+}

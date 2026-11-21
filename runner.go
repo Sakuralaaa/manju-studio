@@ -102,7 +102,9 @@ type Runner struct {
 	postReady      VideoPost
 	teSpeed        bool // 运行时上 TE-Speed 加速节点可用
 	driveAt        time.Time
-	driveIdleSince int64 // 空闲但因云盘仍在上传权重而暂缓关机的起始时间戳（ms）
+	drivePollAt    time.Time // 空闲暂缓关机时上次查云盘上传状态的时间
+	driveUploading bool      // 上次查到的云盘上传状态缓存
+	driveIdleSince int64     // 空闲但因云盘仍在上传权重而暂缓关机的起始时间戳（ms）
 }
 
 var runner = &Runner{Phase: "off", wake: make(chan struct{}, 1)}
@@ -336,6 +338,8 @@ func (r *Runner) touch() {
 	r.mu.Lock()
 	r.LastActive = now()
 	r.driveIdleSince = 0
+	r.driveUploading = false
+	r.drivePollAt = time.Time{}
 	r.mu.Unlock()
 }
 
@@ -350,6 +354,7 @@ func (r *Runner) Stop(reason string) {
 	r.Stage = "关机中"
 	name := "runtimes/" + r.Runtime
 	sid := r.SessionID
+	wasBooted := r.Booted
 	if r.cancelJob != nil {
 		r.cancelJob()
 	}
@@ -359,7 +364,7 @@ func (r *Runner) Stop(reason string) {
 	r.mu.Unlock()
 	r.logf("关机：%s", reason)
 	go func() {
-		if loadColabCfg().DriveCache {
+		if loadColabCfg().DriveCache && wasBooted && reason != "运行时已被回收" && !strings.HasPrefix(reason, "开机失败") {
 			r.driveSync()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -382,6 +387,7 @@ func (r *Runner) Stop(reason string) {
 		r.postReady = VideoPost{}
 		r.teSpeed = false
 		r.StartedAt, r.ReadyAt, r.driveIdleSince = 0, 0, 0
+		r.driveUploading, r.drivePollAt = false, time.Time{}
 		if strings.HasPrefix(reason, "开机失败") {
 			_ = setSetting("colab_autostart_block", "1") // 开机失败后不再自动重试，等手动开机
 			r.Message = strings.TrimPrefix(reason, "开机失败：")
@@ -483,11 +489,25 @@ func (r *Runner) tick() {
 	}
 	if now()-last > int64(cfg.IdleMin)*60_000 {
 		if cfg.DriveCache && booted {
-			uploading := r.driveSync()
 			r.mu.Lock()
 			prev := r.driveIdleSince
+			pollAt := r.drivePollAt
+			uploading := r.driveUploading
+			r.mu.Unlock()
+			// 节流：首次进入空闲检查或距离上次同步已满 30 秒才查 Colab 状态，避免每 3 秒 tick 阻塞与高频打接口
+			if prev == 0 || time.Since(pollAt) >= 30*time.Second {
+				uploading = r.driveSync()
+				r.mu.Lock()
+				r.driveUploading = uploading
+				r.drivePollAt = time.Now()
+				r.mu.Unlock()
+			}
+			r.mu.Lock()
 			deferStop, next := shouldDeferIdleStop(prev, now(), uploading, driveIdleMaxExt)
 			r.driveIdleSince = next
+			if !deferStop {
+				r.driveUploading = false
+			}
 			r.mu.Unlock()
 			if deferStop {
 				if prev == 0 {

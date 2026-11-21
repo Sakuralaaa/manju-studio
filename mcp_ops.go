@@ -318,6 +318,7 @@ func toolUploadBgm(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	res, err := db.Exec(`INSERT INTO bgm(name,file,duration,bytes,created_at) VALUES(?,?,?,?,?)`, name, file, dur, size, now())
 	if err != nil {
+		_ = os.Remove(filepath.Join(dataDir, "audio", file))
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
@@ -600,6 +601,7 @@ func toolDeleteShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	_, _ = db.Exec(`DELETE FROM lines WHERE shot_id=?`, s.ID)
 	_, _ = db.Exec(`DELETE FROM shots WHERE id=?`, s.ID)
 	renumberShots(s.EpisodeID)
+	unlockWaitingPrev(s.EpisodeID)
 	plan["ok"] = true
 	plan["note"] = "已删除"
 	return plan, nil
@@ -640,10 +642,11 @@ func toolReorderShots(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	// 新第 1 镜没有上一镜，若原本设了衔接则改回 cut
 	_, _ = db.Exec(`UPDATE shots SET chain='off' WHERE id=? AND chain<>'off'`, a.ShotIDs[0])
+	unlocked := unlockWaitingPrev(e.ID)
 	touchEpisode(e.ID)
 	order := []map[string]any{}
 	for _, s := range listShots(e.ID, false) {
 		order = append(order, map[string]any{"shot_id": s.ID, "code": s.Code, "chain": s.Chain})
 	}
-	return map[string]any{"ok": true, "episode_id": e.ID, "shots": order}, nil
+	return map[string]any{"ok": true, "episode_id": e.ID, "shots": order, "unlocked_waiting_prev": unlocked}, nil
 }

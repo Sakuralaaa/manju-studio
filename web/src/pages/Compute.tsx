@@ -243,7 +243,7 @@ function Queue({ st }: { st: ColabState }) {
   useEffect(() => { load() }, [])
   useInterval(load, 3000)
   if (!data) return <div className="loading"><Spinner size={20} /></div>
-  const statusText: Record<string, string> = { queued: '排队', running: '生成中', done: '完成', failed: '失败', canceled: '已取消' }
+  const statusText: Record<string, string> = { queued: '排队', waiting_prev: '等上一镜', running: '生成中', done: '完成', failed: '失败', canceled: '已取消' }
   const est = estimate(st, 0, false)
   return (
     <div className="stack">
@@ -262,7 +262,7 @@ function Queue({ st }: { st: ColabState }) {
                   {v.status === 'running' ? <><div className="bar sm"><i style={{ width: `${Math.round(v.progress * 100)}%` }} /></div><span>{Math.round(v.progress * 100)}%</span></> :
                     <span className={`qtag is-${v.status}`}>{v.status === 'queued' ? `第 ${v.position} 位` : statusText[v.status]}</span>}
                 </div>
-                {(v.status === 'queued' || v.status === 'running') ?
+                {(v.status === 'queued' || v.status === 'waiting_prev' || v.status === 'running') ?
                   <button className="icon-btn sm" onClick={() => api(`/api/videos/${v.id}/cancel`, { method: 'POST' }).then(() => { toast('已取消'); load() })} aria-label="取消" title="取消"><X size={14} /></button> :
                   <span className="icon-gap" />}
               </div>

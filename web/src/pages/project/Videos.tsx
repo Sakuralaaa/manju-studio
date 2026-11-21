@@ -74,7 +74,7 @@ export default function Videos() {
   const { st, reload } = useColab()
   const p = data.project, e = data.episode
   const post = { upscale: p.post_upscale, interp: p.post_interp }
-  const shotsNeed = data.shots.filter(s => s.picked_image_id && !s.videos.some(v => v.status === 'done' || v.status === 'queued' || v.status === 'running')).length
+  const shotsNeed = data.shots.filter(s => s.picked_image_id && !s.videos.some(v => v.status === 'done' || v.status === 'queued' || v.status === 'waiting_prev' || v.status === 'running')).length
   const need = shotsNeed * p.takes
   const queueAll = async (start: boolean) => {
     await run(() => api(`/api/episodes/${e.id}/videos/queue`, { body: { start } }).then((r: any) => { if (r.start_error) throw new Error('已排队，开机失败：' + r.start_error) }), start ? '已排队并开机' : '已加入队列')
@@ -108,7 +108,7 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
   const [view, setView] = useState<number | null>(null)
   const [ver, setVer] = useState<'original' | 'converted' | null>(null)
   const kf = s.images.find(i => i.id === s.picked_image_id)
-  const actives = s.videos.filter(v => v.status === 'running' || v.status === 'queued')
+  const actives = s.videos.filter(v => v.status === 'running' || v.status === 'queued' || v.status === 'waiting_prev')
   const active = actives.find(v => v.status === 'running') || actives[0]
   const done = s.videos.filter(v => v.status === 'done')
   const chosen = done.find(v => v.id === s.picked_video_id) || done[done.length - 1]
@@ -134,7 +134,9 @@ function VideoCard({ s, prev, st }: { s: Shot; prev?: Shot; st: ColabState | nul
         {active && <VideoState v={active} more={actives.length - 1} />}
       </div>
       <div className="vstatus">
-        {active ? (active.status === 'running' ? <span className="accent-text">{active.stage || '生成中'}{actives.length > 1 ? ` · 还有 ${actives.length - 1} 条` : ''}</span> : <span>排队第 {active.position} 位{actives.length > 1 ? ` · 共 ${actives.length} 条` : ''}</span>) :
+        {active ? (active.status === 'running' ? <span className="accent-text">{active.stage || '生成中'}{actives.length > 1 ? ` · 还有 ${actives.length - 1} 条` : ''}</span> :
+          active.status === 'waiting_prev' ? <span>等上一镜完成后开跑{actives.length > 1 ? ` · 共 ${actives.length} 条` : ''}</span> :
+            <span>排队第 {active.position} 位{actives.length > 1 ? ` · 共 ${actives.length} 条` : ''}</span>) :
           failNewer ? <span className="danger-text" title={lastFail!.error}>失败：{lastFail!.error}</span> :
             waitPrev && !chosen ? <span className="muted">等上一镜头出视频</span> :
               shown ? <span>{shown.seconds} 秒 · {shown.res}{shown.turbo ? ' · Turbo' : ''}{shown.post?.upscale ? ' · 放大' : ''}{shown.post?.interp ? ' · 补帧' : ''}</span> : <span className="muted">未生成</span>}
@@ -198,7 +200,7 @@ function VideoState({ v, more }: { v: Video; more: number }) {
     <div className="vstate">
       {v.status === 'running' ? <>
         <div className="ring" style={{ ['--p' as any]: pct }}><span>{pct}%</span></div>
-      </> : <><Spinner size={18} /><span>排队中{more > 0 ? ` · ${more + 1} 条` : ''}</span></>}
+      </> : <><Spinner size={18} /><span>{v.status === 'waiting_prev' ? '等上一镜' : '排队中'}{more > 0 ? ` · ${more + 1} 条` : ''}</span></>}
     </div>
   )
 }

@@ -330,6 +330,9 @@ func toolUpdateShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	if dialogueChanged {
 		syncLines(p, e)
 	}
+	if _, ok := sets["chain"]; ok {
+		unlockWaitingPrev(e.ID)
+	}
 	if len(changed) > 0 {
 		touchEpisode(e.ID)
 	}

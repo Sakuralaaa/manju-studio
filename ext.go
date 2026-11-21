@@ -155,7 +155,11 @@ func toolVideoSubmit(ctx context.Context, a videoArgs) (any, error) {
 		if v, err := getVideo(ids[0]); err == nil && v.Status != "" {
 			st = v.Status
 		}
-		return map[string]any{"id": ids[0], "ids": ids, "status": st, "estimate": estimateCU(len(ids), a.Turbo)}, nil
+		effTurbo := p.VideoTurbo
+		if turbo != nil {
+			effTurbo = *turbo
+		}
+		return map[string]any{"id": ids[0], "ids": ids, "status": st, "estimate": estimateCU(len(ids), effTurbo)}, nil
 	}
 	var file string
 	if a.ImageID > 0 {

@@ -1149,7 +1149,11 @@ func handleShotCreate(w http.ResponseWriter, r *http.Request) {
 
 func renumberShots(eid int64) {
 	for i, s := range listShots(eid, false) {
-		_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=?`, i+1, s.ID)
+		if i == 0 && s.Chain != "off" {
+			_, _ = db.Exec(`UPDATE shots SET sort=1, chain='off' WHERE id=?`, s.ID)
+		} else {
+			_, _ = db.Exec(`UPDATE shots SET sort=? WHERE id=?`, i+1, s.ID)
+		}
 	}
 	touchEpisode(eid)
 }
@@ -1189,6 +1193,9 @@ func handleShotUpdate(w http.ResponseWriter, r *http.Request) {
 			syncLines(p, e)
 		}
 	}
+	if chain != s.Chain {
+		unlockWaitingPrev(s.EpisodeID)
+	}
 	touchEpisode(s.EpisodeID)
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -1207,6 +1214,7 @@ func handleShotDelete(w http.ResponseWriter, r *http.Request) {
 	_, _ = db.Exec(`DELETE FROM lines WHERE shot_id=?`, s.ID)
 	_, _ = db.Exec(`DELETE FROM shots WHERE id=?`, s.ID)
 	renumberShots(s.EpisodeID)
+	unlockWaitingPrev(s.EpisodeID)
 	writeJSON(w, map[string]any{"ok": true})
 }
 

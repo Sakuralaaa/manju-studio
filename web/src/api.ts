@@ -16,7 +16,7 @@ export interface Img {
 }
 export interface Video {
   id: number; project_id: number; episode_id: number; shot_id: number; source: string
-  status: 'queued' | 'running' | 'done' | 'failed' | 'canceled'; progress: number; stage: string
+  status: 'queued' | 'waiting_prev' | 'running' | 'done' | 'failed' | 'canceled'; progress: number; stage: string
   prompt: string; image_url: string; last_image_url: string; seconds: number; res: string; aspect: string; turbo: boolean; seed: number
   url: string; bytes: number; error: string; post: { upscale?: boolean; interp?: boolean }; est_cu: number
   created_at: number; started_at: number; finished_at: number; position?: number

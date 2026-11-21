@@ -188,12 +188,17 @@ def upload_weights_bg():
             st = json.load(open(DRIVE_STATUS))
         except Exception:
             pass
+        def write_st():
+            try:
+                tmp = DRIVE_STATUS + ".tmp"
+                with open(tmp, "w") as fh:
+                    json.dump(st, fh)
+                os.replace(tmp, DRIVE_STATUS)
+            except Exception:
+                pass
         st.setdefault("files", {})
         st["uploading"] = True
-        try:
-            json.dump(st, open(DRIVE_STATUS, "w"))
-        except Exception:
-            pass
+        write_st()
         try:
             dirs = " ".join("'" + d.lstrip("/") + "'" for d in weight_dirs())
             if not dirs:
@@ -206,10 +211,7 @@ def upload_weights_bg():
             print("[mj] WARN 变声权重上传缓存失败", str(e)[:200], flush=True)
         finally:
             st["uploading"] = False
-            try:
-                json.dump(st, open(DRIVE_STATUS, "w"))
-            except Exception:
-                pass
+            write_st()
             if os.path.exists(tar):
                 os.remove(tar)
 

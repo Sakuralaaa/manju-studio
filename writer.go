@@ -859,19 +859,30 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("「%s」已经是%s，不能改成别的类型", cur.Name, map[string]string{"character": "角色", "scene": "场景", "prop": "道具"}[cur.Kind])
 	}
 	desc := strings.TrimSpace(a.Description)
-	ld := lookDescription(a.Look)
 	if a.Look != nil && kind != "character" {
 		return nil, errors.New("look 只用于角色；场景和道具直接写 description")
 	}
+	var mergedLook *AssetLook
+	if a.Look != nil && kind == "character" {
+		if cur != nil {
+			ml := cur.Look.merge(*a.Look)
+			mergedLook = &ml
+		} else {
+			ml := *a.Look
+			mergedLook = &ml
+		}
+	}
+	ld := lookDescription(mergedLook)
 	// look 独立存 look_json，不再拼接进 description 造成双写与 320 字截断；
-	// 仅在只传 look 未传 description 时，用格式化外观作为可读 description 兜底。
-	if desc == "" && ld != "" {
+	// 仅在新建或原 description 为空且只传 look 时，用格式化外观作为可读 description 兜底，更新时不覆盖原有 description。
+	if desc == "" && ld != "" && (cur == nil || strings.TrimSpace(cur.Description) == "") {
 		desc = ld
 	}
 	if cur == nil && runeLen(desc) < 6 && ld == "" {
 		return nil, errors.New("description 太短：角色写固定外貌（年龄感、发型发色、五官、体型、服装配色）或用 look，场景写空间、时代、光线、主色调，道具写外形材质")
 	}
-	if kind == "character" && ld == "" && desc != "" && charLookOf(name, desc) == "" {
+	hasExistingLook := cur != nil && !cur.Look.empty()
+	if kind == "character" && ld == "" && !hasExistingLook && desc != "" && charLookOf(name, desc) == "" {
 		return nil, errors.New("角色外观里没有可固定的造型：至少写清发型和服装（如「黑色齐肩短发」「穿明黄色骑手外套」），或用 look 字段")
 	}
 	created := false
@@ -896,8 +907,8 @@ func toolUpsertAsset(ctx context.Context, raw json.RawMessage) (any, error) {
 		_, _ = db.Exec(`UPDATE assets SET name=?, description=?, prompt=? WHERE id=?`, name, desc, prompt, cur.ID)
 		touchProject(p.ID)
 	}
-	if a.Look != nil && kind == "character" {
-		_, _ = db.Exec(`UPDATE assets SET look_json=? WHERE id=?`, mustJSON(a.Look), cur.ID)
+	if mergedLook != nil && kind == "character" {
+		_, _ = db.Exec(`UPDATE assets SET look_json=? WHERE id=?`, mustJSON(mergedLook), cur.ID)
 		touchProject(p.ID)
 	}
 	var warn []string
@@ -1663,7 +1674,7 @@ func handleSignedDL(w http.ResponseWriter, r *http.Request) {
 	case "z":
 		p := filepath.Join(dataDir, "exports", fname)
 		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
-			httpErr(w, 404, "压缩包不存在或已清理，请重新调用 export_voice_candidates")
+			httpErr(w, 404, "压缩包不存在或已清理，请重新调用 export_voice_candidates 或 export_capcut")
 			return
 		}
 		w.Header().Set("Content-Type", "application/zip")

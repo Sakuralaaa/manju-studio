@@ -174,7 +174,11 @@ def drive_token():
 
 def drive_status_write(files, uploading=False):
     try:
-        json.dump({"uploading": bool(uploading), "files": files}, open(DRIVE["status_file"], "w"))
+        p = DRIVE["status_file"]
+        tmp = p + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"uploading": bool(uploading), "files": files}, fh)
+        os.replace(tmp, p)
     except Exception:
         pass
 

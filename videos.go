@@ -287,16 +287,21 @@ func queueShot(p *Project, s *Shot, o queueOpts) ([]int64, error) {
 	return ids, nil
 }
 
-// unlockWaitingPrev 上一镜完成或改选后，检查本集 waiting_prev 的首尾帧视频，补上首帧并推入 queued
+// unlockWaitingPrev 上一镜完成、改选、删镜或重排后，检查本集 waiting_prev 的首尾帧视频：
+// 衔接已失效（无镜头 / 已改非首尾帧 / 已成第 1 镜无上一镜）时自动取消，否则补上首帧推入 queued。
 func unlockWaitingPrev(episodeID int64) int {
 	if episodeID <= 0 {
 		return 0
 	}
 	vs := listVideos(`WHERE episode_id=? AND status='waiting_prev' ORDER BY id`, episodeID)
 	unlocked := 0
+	changed := false
 	for _, v := range vs {
 		s, err := getShot(v.ShotID)
-		if err != nil {
+		if err != nil || s.Chain != "first" || prevShot(s) == nil {
+			_, _ = db.Exec(`UPDATE videos SET status='canceled', stage='', error=?, finished_at=? WHERE id=? AND status='waiting_prev'`,
+				"首尾帧衔接已失效（无上一镜头或已改衔接方式）", now(), v.ID)
+			changed = true
 			continue
 		}
 		lf, err := ensurePrevLastFrame(s)
@@ -305,9 +310,12 @@ func unlockWaitingPrev(episodeID int64) int {
 		}
 		_, _ = db.Exec(`UPDATE videos SET image_file=?, status='queued', stage='' WHERE id=? AND status='waiting_prev'`, lf.File, v.ID)
 		unlocked++
+		changed = true
 	}
 	if unlocked > 0 {
 		runner.poke()
+	}
+	if changed {
 		touchEpisode(episodeID)
 	}
 	return unlocked
@@ -464,7 +472,7 @@ func handleVideoList(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := loadColabCfg()
 	var mins float64
-	for _, v := range listVideos(`WHERE status='queued'`) {
+	for _, v := range listVideos(`WHERE status IN ('queued','waiting_prev')`) {
 		per := cfg.ClipMin
 		if v.Turbo {
 			per = cfg.ClipMinTurbo
