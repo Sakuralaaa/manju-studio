@@ -656,4 +656,22 @@ func TestV0215FrictionFixes(t *testing.T) {
 			t.Fatalf("invalid native subtitle timing: %+v", sl)
 		}
 	}
+
+	// 7) v0.2.16: preview_shot_prompts(shot_id) 填充 code 且拒绝无效 channel_id；colabOp 路径规范与响应提取
+	if pm["code"] != "01" {
+		t.Fatalf("preview_shot_prompts(shot_id) expected code=01, got %q", pm["code"])
+	}
+	if _, err := toolPreviewShotPrompts(context.Background(), json.RawMessage(`{"shot_id":`+jsonInt(s1)+`,"channel_id":99999}`)); err == nil {
+		t.Fatalf("expected error on invalid channel_id")
+	}
+	if got := colabOpPath("operations/op-1"); got != "v1beta/operations/op-1" {
+		t.Fatalf("unexpected colabOpPath: %s", got)
+	}
+	if got := colabOpPath("/v1beta/operations/op-2"); got != "v1beta/operations/op-2" {
+		t.Fatalf("unexpected colabOpPath with v1beta prefix: %s", got)
+	}
+	op := &colabOp{Done: true, Response: json.RawMessage(`{"name":"runtimes/r1","connectionInfo":{"url":"https://jup.test"}}`)}
+	if rt := op.runtime(); rt == nil || rt.ConnectionInfo.URL != "https://jup.test" {
+		t.Fatalf("colabOp.runtime failed: %+v", rt)
+	}
 }

@@ -184,8 +184,51 @@ type ConnInfo struct {
 
 type Runtime struct {
 	Name           string     `json:"name"`
+	State          string     `json:"state"`
 	RuntimeSpec    RuntimeKey `json:"runtimeSpec"`
 	ConnectionInfo *ConnInfo  `json:"connectionInfo"`
+}
+
+type colabOpError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type colabOp struct {
+	Name     string          `json:"name"`
+	Done     bool            `json:"done"`
+	Error    *colabOpError   `json:"error"`
+	Response json.RawMessage `json:"response"`
+}
+
+func (op *colabOp) runtime() *Runtime {
+	if op == nil || len(op.Response) == 0 {
+		return nil
+	}
+	var rt Runtime
+	if json.Unmarshal(op.Response, &rt) == nil && rt.ConnectionInfo != nil && rt.ConnectionInfo.URL != "" {
+		return &rt
+	}
+	return nil
+}
+
+func colabOpPath(opName string) string {
+	p := strings.TrimLeft(strings.TrimSpace(opName), "/")
+	if strings.HasPrefix(p, "v1beta/") {
+		return p
+	}
+	return "v1beta/" + p
+}
+
+func colabGetOp(ctx context.Context, opName string) (*colabOp, error) {
+	if strings.TrimSpace(opName) == "" {
+		return nil, errors.New("空 operation 名称")
+	}
+	var op colabOp
+	if err := colabCall(ctx, "GET", colabOpPath(opName), nil, &op); err != nil {
+		return nil, err
+	}
+	return &op, nil
 }
 
 func colabSubscription(ctx context.Context) (string, error) {
@@ -220,22 +263,15 @@ func colabGetRuntime(ctx context.Context, name string) (*Runtime, error) {
 	return &rt, nil
 }
 
-func colabCreateRuntime(ctx context.Context, id string, key RuntimeKey) error {
-	var op struct {
-		Name  string `json:"name"`
-		Done  bool   `json:"done"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
+func colabCreateRuntime(ctx context.Context, id string, key RuntimeKey) (*colabOp, error) {
+	var op colabOp
 	if err := colabCall(ctx, "POST", "v1beta/runtimes?runtimeId="+url.QueryEscape(id), map[string]any{"runtimeSpec": key}, &op); err != nil {
-		return err
+		return nil, err
 	}
 	if op.Error != nil {
-		return fmt.Errorf("Colab 拒绝分配：%s", op.Error.Message)
+		return &op, fmt.Errorf("Colab 拒绝分配（%d）：%s", op.Error.Code, op.Error.Message)
 	}
-	return nil
+	return &op, nil
 }
 
 func colabDeleteRuntime(ctx context.Context, name string) error {

@@ -239,25 +239,71 @@ func (r *Runner) bringUp(key RuntimeKey) {
 		r.mu.Unlock()
 		r.Stop("开机失败：" + msg)
 	}
-	if err := colabCreateRuntime(ctx, id, key); err != nil {
+	op, err := colabCreateRuntime(ctx, id, key)
+	if err != nil {
 		fail(err.Error())
 		return
 	}
 	r.setPhase("connecting", "等待分配")
 	var rt *Runtime
-	for i := 0; i < 90; i++ {
+	if x := op.runtime(); x != nil {
+		rt = x
+	}
+	var lastNote string
+	doneMiss := 0
+	for i := 0; rt == nil && i < 90; i++ {
 		if ctx.Err() != nil {
 			return
+		}
+		if op != nil && op.Name != "" && !op.Done {
+			if op2, oerr := colabGetOp(ctx, op.Name); oerr == nil && op2 != nil {
+				op = op2
+				if op.Error != nil {
+					fail(fmt.Sprintf("Colab 拒绝分配（%d）：%s", op.Error.Code, op.Error.Message))
+					return
+				}
+				if x := op.runtime(); x != nil {
+					rt = x
+					break
+				}
+			} else if oerr != nil {
+				lastNote = oerr.Error()
+			}
 		}
 		x, err := colabGetRuntime(ctx, name)
 		if err == nil && x.ConnectionInfo != nil && x.ConnectionInfo.URL != "" {
 			rt = x
 			break
 		}
-		time.Sleep(5 * time.Second)
+		if err == nil && x != nil && x.State != "" {
+			lastNote = "状态 " + x.State
+			r.setPhase("connecting", "等待分配（"+x.State+"）")
+			if strings.Contains(strings.ToUpper(x.State), "FAIL") || strings.Contains(strings.ToUpper(x.State), "ERROR") {
+				fail("Colab 运行时分配失败（状态：" + x.State + "）")
+				return
+			}
+		} else if err != nil {
+			lastNote = err.Error()
+			if op != nil && op.Done {
+				doneMiss++
+				if doneMiss >= 3 {
+					fail("Colab 分配已完成但运行时不可用（" + lastNote + "）")
+					return
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 	if rt == nil {
-		fail("等待分配超时")
+		if lastNote != "" {
+			fail("等待分配超时（最后反馈：" + lastNote + "）")
+		} else {
+			fail("等待分配超时")
+		}
 		return
 	}
 	r.setConn(rt.ConnectionInfo)

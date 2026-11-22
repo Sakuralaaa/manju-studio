@@ -103,6 +103,8 @@ description: 漫剧工坊外部编剧规则
 | `get_audio_link` | 音频的限时下载地址（2 小时，不需要密钥）+ 文件名、时长、念的文字：`sample(s)`、`asset_id`（`which` = `sample` / `refs` / `master` / `candidates`，默认全部）、`project_id`（旁白）、`library_id`、`line_id` |
 | `export_voice_candidates` | `project_id`（可选 `asset_ids`）：把各角色的设计候选、当前音色、原声参考、母带（和旁白）打成一个 zip，返回一个限时下载地址；包内文件名全是 ASCII（`C01_asset10_cand1_vd-xxx.wav`），附 `manifest.txt` / `manifest.json`（文件 → 角色、候选序号、原始样本名、时长、文字、是否当前绑定） |
 
+0.2.16：**Colab 分配状态与真实错误透出**：`colabCreateRuntime` 返回异步 Operation（`op.Name`），`bringUp` 轮询期间同步检查 `colabGetOp` 与 `Runtime.State`，Colab 异步拒绝分配（缺卡 / 配额 / 会话数上限等）在数秒内立即报出真实错误而不再白等 7.5 分钟；超时时也附带最后一次接口反馈；顺手修复 `preview_shot_prompts(shot_id)` 返回 `code` 为空及无效 `channel_id` 未报错的小问题。
+
 0.2.15：**全流程 Agent 实操卡点全打通**。
 - **镜头关键帧直挂/直传**：`attach_image` 与 `upload_image` 支持传 `shot_id`，画室图或外部精修图可直接设为镜头关键帧并选用。
 - **多抽卡 + 首尾帧防抢跑**：`takes >= 2` 时，上一镜仍有 `queued`/`running` 抽卡未跑完时暂不自动解锁 `waiting_prev`（显式调用 `pick_video` 或全部抽卡跑完后解锁），避免拿未审的第 1 条抽卡抢跑浪费 GPU。

@@ -21,7 +21,7 @@ import (
 var webFS embed.FS
 
 var (
-	version   = "0.2.15"
+	version   = "0.2.16"
 	dataDir   string
 	adminPass string
 	secret    []byte

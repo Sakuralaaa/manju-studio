@@ -716,6 +716,12 @@ func toolPreviewShotPrompts(ctx context.Context, raw json.RawMessage) (any, erro
 		if err != nil {
 			return nil, errors.New("作品不存在")
 		}
+		for _, x := range listShots(s.EpisodeID, true) {
+			if x.ID == s.ID {
+				s = x
+				break
+			}
+		}
 		shots = []*Shot{s}
 	} else {
 		var e *Episode
@@ -727,10 +733,12 @@ func toolPreviewShotPrompts(ctx context.Context, raw json.RawMessage) (any, erro
 		shots = listShots(e.ID, true)
 	}
 	ch, model, _ := imageChannelFor(p)
-	if ch != nil && (a.ChannelID > 0 || strings.TrimSpace(a.Model) != "") {
-		if ch2, m2, err := applyOverride(ch, model, imgOverride{ChannelID: a.ChannelID, Model: a.Model}); err == nil {
-			ch, model = ch2, m2
+	if a.ChannelID > 0 || strings.TrimSpace(a.Model) != "" {
+		ch2, m2, err := applyOverride(ch, model, imgOverride{ChannelID: a.ChannelID, Model: a.Model})
+		if err != nil {
+			return nil, err
 		}
+		ch, model = ch2, m2
 	}
 	kf := kfOpts{RefTags: a.RefTags, Extra: a.ExtraPrompt}
 	items := make([]map[string]any, 0, len(shots))

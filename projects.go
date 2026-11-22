@@ -852,10 +852,13 @@ func applyOverride(ch *Channel, model string, o imgOverride) (*Channel, string, 
 		if err != nil || c.Kind != "image" {
 			return nil, "", fmt.Errorf("生图渠道 %d 不存在", o.ChannelID)
 		}
-		if c.ID != ch.ID {
+		if ch == nil || c.ID != ch.ID {
 			model = ""
 		}
 		ch = c
+	}
+	if ch == nil {
+		return nil, "", errors.New("未配置生图渠道")
 	}
 	if m := strings.TrimSpace(o.Model); m != "" {
 		if len(ch.Models) > 0 && !contains(ch.Models, m) {
