@@ -126,16 +126,21 @@ type Shot struct {
 	SfxName        string   `json:"sfx_name"`
 	SfxVolume      float64  `json:"sfx_volume"`
 	VoiceUnify     string   `json:"voice_unify"` // 生成后统一音色：空 = 跟随作品；on / off = 本镜头单独开 / 关
+	TrimStart      float64  `json:"trim_start"`  // 手动入点秒（<0 表示由 auto_trim 自动裁静音）
+	TrimEnd        float64  `json:"trim_end"`    // 手动出点秒（<=0 表示自动/到尾）
+	JCut           float64  `json:"j_cut"`       // J-Cut：本镜声音提前切入上一镜尾部的秒数（0–2）
+	LCut           float64  `json:"l_cut"`       // L-Cut：本镜声音延续到下一镜开头的秒数（0–2）
+	SceneGroup     string   `json:"scene_group"` // 同场景调色匹配分组（空 = 自动按主场景资产 S* 连续分段）
 	Images         []*Image `json:"images"`
 	Videos         []*Video `json:"videos"`
 }
 
-const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume,ref_ids,voice_unify`
+const shotCols = `id,project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,picked_image_id,picked_video_id,chain,sfx_file,sfx_name,sfx_volume,ref_ids,voice_unify,trim_start,trim_end,j_cut,l_cut,scene_group`
 
 func scanShot(sc interface{ Scan(...any) error }) (*Shot, error) {
 	var s Shot
 	var codes, refs string
-	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume, &refs, &s.VoiceUnify); err != nil {
+	if err := sc.Scan(&s.ID, &s.ProjectID, &s.EpisodeID, &s.Sort, &s.Duration, &s.Camera, &s.Action, &s.Dialogue, &codes, &s.KeyframePrompt, &s.VideoPrompt, &s.PickedImageID, &s.PickedVideoID, &s.Chain, &s.SfxFile, &s.SfxName, &s.SfxVolume, &refs, &s.VoiceUnify, &s.TrimStart, &s.TrimEnd, &s.JCut, &s.LCut, &s.SceneGroup); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(refs), &s.refIDs)
@@ -206,8 +211,9 @@ func prevShot(s *Shot) *Shot {
 
 // ---------- ② 剧本 ----------
 
-const scriptSystem = `你是一名专写竖屏漫剧（AI 生成的连载短篇动态漫画剧）的编剧。你写的单集剧本要做到：
+const scriptSystem = `你是一名专写竖屏短剧/漫剧（AI 生成的连载短篇剧集）的编剧。你写的单集剧本要做到：
 - 开场 3 秒内给出强钩子（冲突、悬念或反常画面）；如果有上一集卡点，开场直接接住它；
+- **单集场景克制**：1–2 分钟单集最多安排 **1–2 个连续主场景**（用正反打、景别切换和情绪推进演完整场戏），严禁在 2 分钟内频繁切 5–6 个地点/时间线导致成片像碎片预告片；
 - 节拍紧凑：每 5–10 秒一个情绪或信息推进，台词短、口语化，一句不超过 20 字；
 - 中段有一次反转；
 - 结尾停在悬念（卡点），让观众想看下一集；
@@ -1014,17 +1020,18 @@ func handleAssetUpload(w http.ResponseWriter, r *http.Request) {
 
 // ---------- ④ 分镜 ----------
 
-const storyboardSystem = `你是漫剧分镜师。把剧本拆成按顺序播放的镜头，每个镜头会先生成一张关键帧，再用图生视频模型生成 5–10 秒的动态镜头。
+const storyboardSystem = `你是竖屏短剧/漫剧分镜师。把剧本拆成按顺序播放的连贯镜头，每个镜头会先生成一张关键帧，再用 MiniMax H3 图生视频模型生成 5–10 秒的动态镜头。
 要求：
 - 镜头总数接近目标数量，单个镜头 duration 取 5 到 10 的整数秒，总时长接近单集时长；
-- camera：景别 + 机位/运镜，如「近景 · 缓慢推近」「全景 · 固定」「过肩 · 轻微手持」；
-- action：画面里发生什么（人物动作、表情、环境变化），一个镜头只做一件事；
+- **180° 轴线与空间锁定**：同一场景内固定人物左右位置、窗外光源方向与主背景朝向（正反打遵循 180° 轴线），并为同一光线/地点的镜头标明相同的 scene_group（如 "S01-day"、"S01-dusk"）供后期自动调色匹配；
+- camera：景别 + 机位/运镜，如「近景 · 缓慢推近」「中景 · 固定」「过肩 · 轻微手持」；
+- action：画面里发生什么（人物动作、表情、环境变化），**一个镜头只做一件清晰、克制、自然的动作**；避免大幅 180° 转身、极速甩镜、剧烈表情抽搐等 AI 视频易崩坏动作；
 - dialogue：这个镜头里的台词或旁白，每句一行，格式「角色名：台词」，旁白写「旁白：……」，需要特别语气时在台词前用全角括号注明，如「林晚：（压低声音）别出声」；没有就留空；一个镜头的台词念完不要超过镜头时长；
 - assets：这个镜头出现的资产编号（只能用下面资产表里的编号，角色在前、场景其次、道具最后）；
 - continuous：和上一个镜头是同一场景里连续的动作时为 true（会用上一镜头的最后一帧衔接），否则 false；
-- keyframe_prompt：关键帧画面的中文生图提示词，写清构图、景别、人物位置与表情、光线，直接用资产名称指代角色和场景；
-- video_prompt：给图生视频模型的中文描述，只写从这张关键帧开始的动作、镜头运动、环境动态和声音（台词、音效、配乐氛围），不重复静态外观。
-只输出 JSON：{"shots":[{"duration":5,"camera":"","action":"","dialogue":"","assets":["C01","S01"],"continuous":false,"keyframe_prompt":"","video_prompt":""}]}`
+- keyframe_prompt：关键帧画面的中文生图提示词，写清构图、景别、人物左右位置与视线朝向、表情、光线，直接用资产名称指代角色和场景；
+- video_prompt：优先用**纯英文**写从关键帧开始的单一自然动作、平缓运镜、环境动态与声音（避免在 <d> 标签外写大量中文被 H3 误念出声），禁止使用「eyes flush red / unblinking / violently / whip-pan / jaw drops wide」等易出恐怖谷或糊屏的极端词。
+只输出 JSON：{"shots":[{"duration":5,"camera":"","action":"","dialogue":"","assets":["C01","S01"],"continuous":false,"scene_group":"S01-day","keyframe_prompt":"","video_prompt":""}]}`
 
 type shotDraft struct {
 	Duration       float64  `json:"duration"`
@@ -1037,6 +1044,11 @@ type shotDraft struct {
 	VideoPrompt    string   `json:"video_prompt"`
 	Chain          string   `json:"chain"`
 	SfxVolume      *float64 `json:"sfx_volume"`
+	TrimStart      *float64 `json:"trim_start"`
+	TrimEnd        *float64 `json:"trim_end"`
+	JCut           *float64 `json:"j_cut"`
+	LCut           *float64 `json:"l_cut"`
+	SceneGroup     *string  `json:"scene_group"`
 }
 
 func assetTable(assets []*Asset) string {
@@ -1102,8 +1114,12 @@ func splitTask(p *Project, e *Episode) (int64, error) {
 			if s.Continuous && i > 0 {
 				chain = "ref"
 			}
-			if _, err := tx.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-				p.ID, e.ID, i+1, d, s.Camera, s.Action, s.Dialogue, mustJSON(codes), s.KeyframePrompt, s.VideoPrompt, chain, now()); err != nil {
+			sg := ""
+			if s.SceneGroup != nil {
+				sg = strings.TrimSpace(*s.SceneGroup)
+			}
+			if _, err := tx.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,scene_group,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				p.ID, e.ID, i+1, d, s.Camera, s.Action, s.Dialogue, mustJSON(codes), s.KeyframePrompt, s.VideoPrompt, chain, sg, now()); err != nil {
 				return err
 			}
 		}
@@ -1200,6 +1216,29 @@ func handleShotUpdate(w http.ResponseWriter, r *http.Request) {
 		d, in.Camera, in.Action, in.Dialogue, mustJSON(in.Assets), in.KeyframePrompt, in.VideoPrompt, chain, s.ID)
 	if in.SfxVolume != nil {
 		_, _ = db.Exec(`UPDATE shots SET sfx_volume=? WHERE id=?`, clampF(*in.SfxVolume, 0, 2), s.ID)
+	}
+	if in.TrimStart != nil {
+		ts := *in.TrimStart
+		if ts < 0 {
+			ts = -1
+		}
+		_, _ = db.Exec(`UPDATE shots SET trim_start=? WHERE id=?`, ts, s.ID)
+	}
+	if in.TrimEnd != nil {
+		te := *in.TrimEnd
+		if te < 0 {
+			te = 0
+		}
+		_, _ = db.Exec(`UPDATE shots SET trim_end=? WHERE id=?`, te, s.ID)
+	}
+	if in.JCut != nil {
+		_, _ = db.Exec(`UPDATE shots SET j_cut=? WHERE id=?`, clampF(*in.JCut, 0, 2), s.ID)
+	}
+	if in.LCut != nil {
+		_, _ = db.Exec(`UPDATE shots SET l_cut=? WHERE id=?`, clampF(*in.LCut, 0, 2), s.ID)
+	}
+	if in.SceneGroup != nil {
+		_, _ = db.Exec(`UPDATE shots SET scene_group=? WHERE id=?`, strings.TrimSpace(*in.SceneGroup), s.ID)
 	}
 	if in.Dialogue != s.Dialogue {
 		if p, e, err := epCtx(s.EpisodeID); err == nil {

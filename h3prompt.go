@@ -8,7 +8,9 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 )
 
 func h3AlignHeader(seconds int, hasLastFrame bool) string {
@@ -121,17 +123,47 @@ func cleanH3Dialogue(s string) string {
 	return s
 }
 
+// h3EmotionEnglish 将常见中文语气词映射为英文声演提示，避免在 <d> 外残留中文被 H3 误念
+func h3EmotionEnglish(emo string) string {
+	e := strings.TrimSpace(emo)
+	if e == "" {
+		return ""
+	}
+	table := map[string]string{
+		"笑": "with a light smile", "轻笑": "with a soft chuckle", "微笑": "warmly with a slight smile",
+		"冷笑": "with a cold smirk", "苦笑": "with a wry smile", "嘲讽": "in a dry, sarcastic tone",
+		"低声": "in a low voice", "压低声音": "in a hushed, low voice", "耳语": "in a quiet whisper", "轻声": "softly",
+		"平静": "calmly", "冷静": "in a calm, composed tone", "冷淡": "coolly and evenly", "淡然": "matter-of-factly",
+		"温柔": "gently and warmly", "严肃": "seriously", "坚定": "firmly", "笃定": "with quiet conviction",
+		"急促": "urgently", "紧张": "tensely", "慌张": "anxiously", "惊讶": "in quiet surprise", "震惊": "in stunned disbelief",
+		"愤怒": "in a tense, angry tone", "怒": "angrily", "质问": "in a sharp, questioning tone",
+		"哽咽": "with a slightly choked, emotional voice", "悲伤": "quietly and sadly", "疲惫": "wearily",
+		"无奈": "with a resigned sigh", "激动": "with heightened emotion", "试探": "tentatively", "打趣": "playfully",
+	}
+	if en, ok := table[e]; ok {
+		return en
+	}
+	return e
+}
+
 func speakerHint(assets []*Asset, name string) string {
 	a := matchSpeaker(assets, name)
 	if a == nil {
 		return name
 	}
 	var bits []string
-	if strings.TrimSpace(a.Look.Age) != "" {
-		bits = append(bits, strings.TrimSpace(a.Look.Age))
+	if g := strings.TrimSpace(a.Look.Gender); g != "" {
+		switch g {
+		case "男", "男性":
+			bits = append(bits, "male")
+		case "女", "女性":
+			bits = append(bits, "female")
+		default:
+			bits = append(bits, g)
+		}
 	}
-	if strings.TrimSpace(a.Look.Gender) != "" {
-		bits = append(bits, strings.TrimSpace(a.Look.Gender))
+	if age := strings.TrimSpace(a.Look.Age); age != "" {
+		bits = append(bits, age)
 	}
 	if strings.TrimSpace(a.Voice.Desc) != "" {
 		vd := strings.TrimSpace(a.Voice.Desc)
@@ -144,6 +176,62 @@ func speakerHint(assets []*Asset, name string) string {
 		return a.Name
 	}
 	return fmt.Sprintf("%s (%s)", a.Name, strings.Join(bits, ", "))
+}
+
+var (
+	h3DialogueTagRe = regexp.MustCompile(`(?s)<d>.*?</d>`)
+	h3BadTriggers   = []struct {
+		pattern string
+		reason  string
+	}{
+		{"eyes flush red", "容易导致眼球血红/阴间恐怖脸，建议改为「eyes glisten slightly」或克制凝视"},
+		{"bloodshot", "容易导致眼球充血恐怖失真，建议删去"},
+		{"unblinking", "H3 不眨眼提示词易产生死鱼眼/恐怖谷感，建议改为自然微眨"},
+		{"jaw drops wide", "过度张大嘴易造成面部塌陷恐怖脸，建议改为微愣/目光停住"},
+		{"wide shocked eyes", "过度瞪眼易出阴间微表情，建议改为克制错愕"},
+		{"whip-pan", "极速甩镜在 H3 易整段糊屏或瞬移，建议改为平稳跟拍或直接切镜"},
+		{"whip pan", "极速甩镜在 H3 易整段糊屏或瞬移，建议改为平稳跟拍或直接切镜"},
+		{"rushing rapidly", "高速冲刺运动在 H3 易出现肢体撕裂/糊屏，建议改为稳步快走或慢推"},
+		{"extreme eyeball zoom", "极限眼球拉近易畸变，建议改为普通近景/特写"},
+		{"violently", "剧烈动作词易引发抽搐与穿模，建议改为克制、单一的自然动作"},
+		{"turns around 180", "H3 I2V 对 180° 转身方向控制不稳，建议在转身前直接切镜"},
+		{"spins around", "大幅旋转易穿模与掉脸，建议改为半身微转或切镜"},
+		{"眼眶瞬间通红", "容易引发红眼恐怖脸，建议改为克制微表情"},
+		{"瞳孔骤缩", "容易引发恐怖谷凝视，建议改为目光骤停"},
+		{"面目狰狞", "容易导致面部畸变，建议改为克制紧绷神情"},
+		{"急速甩镜", "极速甩镜在 H3 易整段糊屏，建议直接硬切或慢摇"},
+		{"剧烈摇晃", "易引发画面撕裂，建议改为轻微自然手持"},
+	}
+)
+
+// h3PromptWarnings 在 0 成本预览/存分镜时检测 MiniMax H3 实测高发雷区：
+// 1) <d> 标签外含较多中文描述（H3 偶发会把中文动作说明直接念出声）；
+// 2) 实测会导致阴间微表情、糊屏或转身崩坏的危险触发词。
+func h3PromptWarnings(finalVP string, nativeAudio bool) []string {
+	var warns []string
+	// 1. 剥离 <d>...</d> 以及风格括号后的主体，统计残余汉字数量
+	body := finalVP
+	if idx := strings.Index(body, "integrated_multimodal_description:"); idx >= 0 {
+		body = body[idx:]
+	}
+	stripped := h3DialogueTagRe.ReplaceAllString(body, "")
+	cjk := 0
+	for _, r := range stripped {
+		if unicode.Is(unicode.Han, r) {
+			cjk++
+		}
+	}
+	if nativeAudio && cjk >= 12 {
+		warns = append(warns, fmt.Sprintf("H3 视频提示词在 <d> 标签外含 %d 个汉字：MiniMax H3 偶发会把中文动作/运镜描述直接念出声；建议将 video_prompt 写成纯英文（或手写纯英文 integrated_multimodal_description:，仅 <d>[Chinese] 台词</d> 用中文）", cjk))
+	}
+	// 2. 扫描实测 H3 阴间脸 / 糊屏 / 崩坏触发词
+	low := strings.ToLower(finalVP)
+	for _, item := range h3BadTriggers {
+		if strings.Contains(low, item.pattern) {
+			warns = append(warns, fmt.Sprintf("H3 风险词「%s」：%s", item.pattern, item.reason))
+		}
+	}
+	return warns
 }
 
 // shotVideoPromptFor 生成符合 MiniMax H3 官方规范的视频提示词（I2VA / FL2VA）
@@ -216,7 +304,7 @@ func shotVideoPromptFor(p *Project, s *Shot, seconds int, hasLastFrame bool) str
 				if !existed {
 					who = speakerHint(assets, pl.speaker)
 				}
-				if emo := strings.TrimSpace(pl.emotion); emo != "" {
+				if emo := h3EmotionEnglish(pl.emotion); emo != "" {
 					desc = append(desc, fmt.Sprintf("%s (%s) speaks (%s): <d>[Chinese] %s</d>", who, sid, emo, txt))
 				} else {
 					desc = append(desc, fmt.Sprintf("%s (%s) says: <d>[Chinese] %s</d>", who, sid, txt))

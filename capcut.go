@@ -136,7 +136,7 @@ func writeCapcutZip(w io.Writer, tl *timeline, draftName, root string) error {
 		if tl.Dub {
 			vol = p.OrigVolume
 		}
-		seg := segBase(jyID(), mat, us(c.Start), us(c.Info.dur), map[string]any{"start": 0, "duration": us(c.Info.dur)}, 1.0, vol, []string{d.speed(1)}, 0)
+		seg := segBase(jyID(), mat, us(c.Start), us(c.Dur), map[string]any{"start": us(c.TrimStart), "duration": us(c.Dur)}, 1.0, vol, []string{d.speed(1)}, 0)
 		seg["clip"] = clipXform(0)
 		seg["uniform_scale"] = map[string]any{"on": true, "value": 1.0}
 		seg["hdr_settings"] = map[string]any{"intensity": 1.0, "mode": 1, "nits": 1000}
@@ -173,8 +173,8 @@ func writeCapcutZip(w io.Writer, tl *timeline, draftName, root string) error {
 		files[name] = path
 		ci, _ := probe(path)
 		dur := ci.dur
-		if dur > c.Info.dur {
-			dur = c.Info.dur
+		if dur > c.Dur {
+			dur = c.Dur
 		}
 		mat := d.audioMat(matPath(name), name, ci.dur)
 		seg := segBase(jyID(), mat, us(c.Start), us(dur), map[string]any{"start": 0, "duration": us(dur)}, 1.0, c.Shot.SfxVolume, []string{d.speed(1)}, 2)
@@ -208,8 +208,8 @@ func writeCapcutZip(w io.Writer, tl *timeline, draftName, root string) error {
 	for _, c := range tl.Clips {
 		for _, sl := range c.Subs {
 			dur := sl.Dur
-			if sl.Start+dur > c.Info.dur {
-				dur = c.Info.dur - sl.Start
+			if sl.Start+dur > c.Dur {
+				dur = c.Dur - sl.Start
 			}
 			if dur <= 0.05 {
 				continue

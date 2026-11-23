@@ -21,6 +21,7 @@
 ## 写作要求
 
 - 全部用**简体中文**。
+- **单集场景克制（防碎片感）**：1–2 分钟单集最多安排 **1–2 个连续主场景**（用正反打、景别切换和情绪推进演完整场戏），不要在 2 分钟内连跳 5–6 个地点/时间线。
 - **开场 3 秒内给钩子**：冲突、悬念或反常画面；有上一集卡点时，开场直接接住它。
 - 节拍紧凑：每 5–10 秒推进一次情绪或信息；中段有一次反转。
 - **结尾必须是卡点**：停在悬念上，让人想看下一集。
@@ -71,8 +72,10 @@
 
 - 每个镜头 5–10 秒，镜头数接近作品设定的目标数，总时长接近单集时长。
 - `camera` 写景别 + 机位/运镜（如「近景 · 缓慢推近」）；`picture` 一个镜头只做一件事。
-- `keyframe_prompt`：构图、景别、人物位置与表情、光线，直接用资产名称指代角色和场景。
-- `video_prompt`：只写从关键帧开始的动作、镜头运动、环境动态和声音，不重复静态外观（服务端会自动组装成 MiniMax H3 官方多模态格式：对齐首行 + `integrated_multimodal_description` + `(S1)`/`<d>[Chinese] ...</d>` + `overall_soundscape` + `non_diegetic_music`；若你直接写出含 `integrated_multimodal_description:` 的官方格式会原样透传）。不要在视频描述里堆「不要人声/不要字幕」等否定词。
+- `keyframe_prompt`：构图、景别、人物左右位置与视线朝向（遵循 180° 轴线）、表情、光线，直接用资产名称指代角色和场景；同场景先定好主场景母板与固定正反打机位，并为同光线场景的镜头标明相同的 `scene_group`（如 `S01-day` / `S01-dusk`）。
+- `video_prompt`：只写从关键帧开始的**单一、克制、自然**动作、平缓运镜、环境动态和声音，不重复静态外观。**强烈建议用纯英文写 `video_prompt`（仅 `<d>[Chinese] 台词</d>` 用中文）**，避免 MiniMax H3 偶发把中文动作说明念出声；禁止使用 `eyes flush red / unblinking / violently / whip-pan / jaw drops wide / turns around 180` 等实测易出恐怖谷或糊屏的极端词（`preview_shot_prompts` 会自动检查并告警）。不要堆「不要人声/不要字幕」等否定词。
+- **0 算力开机前总检**：整集关键帧齐备后、**开机跑视频前**，先调 `view_episode_keyframes` 一次看全集编号拼图（查轴线、光线、脸型、服装穿帮）再调 `preview_shot_prompts` 检查 H3 提示词告警，全部确认无误再申请开机。
+- **丝滑成片后期与质检（v0.3.0）**：`build_final` 默认开启波形自动裁首尾静音（`auto_trim`，消除 H3 开头 1.3–2.4s 僵硬起势并让字幕紧贴开口）、同场景 RGB 亮度/白平衡匹配（`shot_match`）、逐镜响度均衡至 `-18 dBFS`（`audio_norm`）及切点 `0.12s` 音频叠化（`audio_xfade`）；可用 `set_episode_edit` 调全局电影调色（`cinema_cool` / `cinema_warm` / `moody` / `noir`），用 `set_shot_edit` 给对白→反应镜加 `l_cut` / `j_cut`（0.3–0.6s 声画错位）与手动入出点，配一首贯通全集的连续 BGM（`set_episode_audio` 开 `bgm_duck=true`），成片后用 `verify_final` 自动核查切点亮度与音频跳变。
 - `transition`：`cut` 直接切；`continuous` 同一场景的连续动作；`first_last` 需要严格接上一镜最后一帧时用（多抽卡时会等上一镜全部抽卡完成或手动 `pick_video` 后再解锁）。
 - 全流程辅助工具：查语音渠道用 `list_voice_channels`；出图/排视频前用 `preview_shot_prompts`（0 成本）核对最终提示词与参考图截断；画室图或修好的图直挂镜头关键帧用 `attach_image` / `upload_image`（传 `shot_id`）；批量补资产图用 `generate_missing_assets`；查全局视频队列用 `list_video_queue`；配音模式微调单句台词用 `list_lines` / `update_line` / `generate_line`；长剧集查分镜用 `list_shots`（传 `episode_id`、`brief=true`）；`view_image` / `view_asset_images` / `view_shot` 返回图片块的同时也附带 2 小时免密钥下载链接。
 

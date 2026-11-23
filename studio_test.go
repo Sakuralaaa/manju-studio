@@ -415,6 +415,7 @@ func TestMCPToolsListUniqueAndOps(t *testing.T) {
 		"reorder_shots", "set_voice_conv_override",
 		"list_voice_channels", "preview_shot_prompts", "generate_missing_assets",
 		"list_video_queue", "list_lines", "update_line", "generate_line",
+		"set_shot_edit", "set_episode_edit", "verify_final", "view_episode_keyframes",
 	} {
 		if !seen[want] {
 			t.Fatalf("missing expected MCP tool: %s", want)
@@ -673,5 +674,143 @@ func TestV0215FrictionFixes(t *testing.T) {
 	op := &colabOp{Done: true, Response: json.RawMessage(`{"name":"runtimes/r1","connectionInfo":{"url":"https://jup.test"}}`)}
 	if rt := op.runtime(); rt == nil || rt.ConnectionInfo.URL != "https://jup.test" {
 		t.Fatalf("colabOp.runtime failed: %+v", rt)
+	}
+}
+
+func TestV030SeamlessDramaEngine(t *testing.T) {
+	defer setupTestEnv(t)()
+
+	// 1) 波形自动裁静音：2.0s 低环境底噪 + 2.5s 人声 + 1.0s 尾部底噪（总 5.5s）
+	const sr = 8000
+	pcm := make([]int16, int(5.5*sr))
+	for i := range pcm {
+		sec := float64(i) / float64(sr)
+		amp := 350.0 // 稳态低底噪（约 -39 dBFS）
+		if sec >= 2.0 && sec <= 4.5 {
+			amp = 6000.0 // 真实对白（约 -15 dBFS）
+		}
+		// 400Hz 正弦近似（交替符号确保 RMS 准确）
+		if (i/10)%2 == 0 {
+			pcm[i] = int16(amp)
+		} else {
+			pcm[i] = int16(-amp)
+		}
+	}
+	span := analyzeAudiblePCM(pcm, sr)
+	if !span.OK || span.HeadSec < 1.9 || span.HeadSec > 2.1 || span.TailSec < 4.4 || span.TailSec > 4.6 {
+		t.Fatalf("analyzeAudiblePCM inaccurate: %+v", span)
+	}
+	// 自动裁切对白镜头：裁掉 ~1.78s 静默起势，尾部留 ~0.32s
+	ts, te := computeClipTrim(5.5, true, -1, 0, 0, true, span)
+	if ts < 1.65 || ts > 1.90 || te < 4.70 || te > 4.95 {
+		t.Fatalf("computeClipTrim auto dialogue unexpected: [%.3f, %.3f]", ts, te)
+	}
+	// 带 L-Cut 时画面提前切入反应镜头，确保后面有音频尾柄
+	tsL, teL := computeClipTrim(5.5, true, -1, 0, 0.5, true, span)
+	if teL >= te-0.25 || tsL != ts {
+		t.Fatalf("computeClipTrim L-Cut should pull visual out-point earlier: normal=%.3f lcut=%.3f", te, teL)
+	}
+	// 手动 trim_start=0 显式锁死开头，不被 autoTrim 覆盖
+	tsM, teM := computeClipTrim(5.5, true, 0, 4.0, 0, true, span)
+	if tsM != 0 || teM != 4.0 {
+		t.Fatalf("manual trim override failed: [%.3f, %.3f]", tsM, teM)
+	}
+
+	// 2) 同场景 RGB 亮度/白平衡匹配：显式分组跨集匹配，自动 S* 仅连续分段匹配
+	stats := []rgbStats{
+		{MeanR: 120, MeanG: 120, MeanB: 120, StdR: 40, StdG: 40, StdB: 40, Valid: true},
+		{MeanR: 165, MeanG: 160, MeanB: 155, StdR: 42, StdG: 42, StdB: 42, Valid: true}, // 明显过亮
+		{MeanR: 60, MeanG: 62, MeanB: 70, StdR: 25, StdG: 25, StdB: 25, Valid: true},   // 中间切到另一场景
+		{MeanR: 122, MeanG: 121, MeanB: 119, StdR: 39, StdG: 39, StdB: 39, Valid: true},
+	}
+	// 显式组 "S01-day" 包含 0, 1, 3 -> 中位约 122，仅镜头 1 需明显拉暗
+	fExp := planShotMatch([]string{"S01-day", "S01-day", "S02", "S01-day"}, []bool{true, true, false, true}, stats, 0.7)
+	if fExp[1] == "" || !strings.Contains(fExp[1], "lutrgb=") || fExp[2] != "" {
+		t.Fatalf("planShotMatch explicit group failed: %+v", fExp)
+	}
+	// 自动组下镜头 3 独立成段，不与前段混合
+	fAuto := planShotMatch([]string{"S01", "S01", "S02", "S01"}, []bool{false, false, false, false}, stats, 0.7)
+	if fAuto[3] != "" {
+		t.Fatalf("planShotMatch auto run should not match non-consecutive segment 3: %+v", fAuto)
+	}
+
+	// 3) 音频黏合放置：验证严格唇音同步恒等式 TimeStart - SrcStart == clipStart - trimStart
+	pl := computeAudioPlacement(1, 3, 3.2, 1.5, 4.5, 6.0, 3.2, 3.5, 0.4, 0.5, 0.12, 1.0, computeNormGainDB(span, true))
+	syncDiff := (pl.TimeStart - pl.SrcStart) - (3.2 - 1.5)
+	if syncDiff < -0.002 || syncDiff > 0.002 {
+		t.Fatalf("audio placement broke lip-sync invariant: diff=%.4f pl=%+v", syncDiff, pl)
+	}
+	if pl.SrcStart >= 1.5 || pl.SrcDur <= 3.0+0.8 {
+		t.Fatalf("J-Cut/L-Cut audio handles not expanded properly: %+v", pl)
+	}
+
+	// 4) 切点质检判定：同场景亮度跳变 >20 告警、跨场景放行、音频 >10 dB 告警
+	if _, _, st, _ := evaluateCutJump(true, 90, 118, -18, -19); st != "WARN" {
+		t.Fatalf("same-scene luma jump 28 should WARN")
+	}
+	if _, _, st, _ := evaluateCutJump(false, 40, 140, -18, -19); st != "PASS" {
+		t.Fatalf("cross-scene luma jump should PASS")
+	}
+	if _, _, st, _ := evaluateCutJump(true, 100, 104, -26, -13); st != "WARN" {
+		t.Fatalf("audio jump 13 dB should WARN")
+	}
+
+	// 5) H3 提示词安全护栏：检测 <d> 外中文描述与实测阴间/糊屏触发词
+	badVP := "integrated_multimodal_description: [Shot 1] 男主转身愤怒瞪眼，眼神突然变红且剧烈摇晃。eyes flush red, whip-pan quickly. (S1) says: <d>[Chinese] 你别走。</d>"
+	ws := h3PromptWarnings(badVP, true)
+	if len(ws) < 3 {
+		t.Fatalf("expected >=3 warnings for bad H3 prompt, got %v", ws)
+	}
+	cleanVP := "integrated_multimodal_description: [Shot 1] Live-action cinematic medium shot. The camera pushes in slowly. A-Ce (S1) speaks calmly: <d>[Chinese] 你先坐下慢慢说。</d>\n\noverall_soundscape: Soft train hum.\n\nnon_diegetic_music: N/A"
+	if cw := h3PromptWarnings(cleanVP, true); len(cw) != 0 {
+		t.Fatalf("expected 0 warnings for clean English H3 prompt, got %v", cw)
+	}
+
+	// 6) MCP 工具：set_episode_edit、set_shot_edit（批量）、view_episode_keyframes（纯 Go 编号拼图）
+	pr, _ := db.Exec(`INSERT INTO projects(title,style,created_at,updated_at) VALUES('丝滑测','电影感',?,?)`, now(), now())
+	pid, _ := pr.LastInsertId()
+	e, _ := insertEpisode(pid, "单场景高张力冲突")
+	_, _ = db.Exec(`UPDATE episodes SET script='# 标题\n## 第 1 场 · 餐车\n【画面】对峙\n【卡点】反转' WHERE id=?`, e.ID)
+	s1Out, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":6,"camera":"中景","picture":"画面1","scene_group":"S01-dusk","keyframe_prompt":"画面1详细关键帧描述","video_prompt":"The camera holds steady as he sets the cup down."}`))
+	s2Out, _ := toolAddShot(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"duration":6,"camera":"近景","picture":"画面2","scene_group":"S01-dusk","keyframe_prompt":"画面2详细关键帧描述","video_prompt":"The camera pushes in slowly as she looks up."}`))
+	s1ID := s1Out.(map[string]any)["shot_id"].(int64)
+	s2ID := s2Out.(map[string]any)["shot_id"].(int64)
+
+	epEdit, err := toolSetEpisodeEdit(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"auto_trim":true,"shot_match":true,"audio_xfade":0.15,"audio_norm":true,"color_grade":"moody"}`))
+	if err != nil || epEdit.(map[string]any)["color_grade"] != "moody" {
+		t.Fatalf("set_episode_edit failed: err=%v out=%+v", err, epEdit)
+	}
+	shEdit, err := toolSetShotEdit(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"edits":[{"code":"01","l_cut":0.5,"scene_group":"S01-dusk"},{"shot_id":`+jsonInt(s2ID)+`,"j_cut":0.3,"trim_start":0.4,"trim_end":4.8}]}`))
+	if err != nil || shEdit.(map[string]any)["updated"] != 2 {
+		t.Fatalf("batch set_shot_edit failed: err=%v out=%+v", err, shEdit)
+	}
+	s1Row, _ := getShot(s1ID)
+	s2Row, _ := getShot(s2ID)
+	if s1Row.LCut != 0.5 || s2Row.JCut != 0.3 || s2Row.TrimStart != 0.4 || s2Row.TrimEnd != 4.8 {
+		t.Fatalf("shot edit fields not persisted: s1=%+v s2=%+v", s1Row, s2Row)
+	}
+
+	im1, _ := storeImageX(pid, e.ID, "shot", s1ID, "", makePNGBytes(90, 160, color.RGBA{40, 80, 120, 255}), "gen", "", 0, "")
+	im2, _ := storeImageX(pid, e.ID, "shot", s2ID, "", makePNGBytes(90, 160, color.RGBA{120, 80, 40, 255}), "gen", "", 0, "")
+	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im1.ID, s1ID)
+	_, _ = db.Exec(`UPDATE shots SET picked_image_id=? WHERE id=?`, im2.ID, s2ID)
+	kfSheet, err := toolViewEpisodeKeyframes(context.Background(), json.RawMessage(`{"episode_id":`+jsonInt(e.ID)+`,"cols":2}`))
+	if err != nil {
+		t.Fatalf("view_episode_keyframes failed: %v", err)
+	}
+	rich := kfSheet.(*mcpRich)
+	if len(rich.Blocks) != 2 || rich.Structured.(map[string]any)["included"] != 2 {
+		t.Fatalf("view_episode_keyframes unexpected output: %+v", rich.Structured)
+	}
+
+	// 7) 验证 colab/job.py 包含 KeyboardInterrupt 捕获与 ComfyUI /interrupt + /queue 清理
+	jobPy, err := os.ReadFile("colab/job.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"def abort_comfy", `"/interrupt"`, `"/queue"`, "KeyboardInterrupt"} {
+		if !strings.Contains(string(jobPy), want) {
+			t.Fatalf("colab/job.py missing %q", want)
+		}
 	}
 }

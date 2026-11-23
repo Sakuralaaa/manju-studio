@@ -237,8 +237,10 @@ func toolProjects(ctx context.Context) (any, error) {
 }
 
 func shotView(s *Shot, base string) map[string]any {
+	effG, _ := effectiveSceneGroup(s)
 	m := map[string]any{"id": s.ID, "episode_id": s.EpisodeID, "code": s.Code, "duration": s.Duration, "camera": s.Camera, "action": s.Action, "dialogue": s.Dialogue,
-		"assets": s.Assets, "chain": s.Chain, "keyframe_prompt": s.KeyframePrompt, "video_prompt": s.VideoPrompt}
+		"assets": s.Assets, "chain": s.Chain, "scene_group": effG, "trim_start": s.TrimStart, "trim_end": s.TrimEnd, "j_cut": s.JCut, "l_cut": s.LCut,
+		"keyframe_prompt": s.KeyframePrompt, "video_prompt": s.VideoPrompt}
 	if s.PickedImageID > 0 {
 		m["keyframe_image_id"] = s.PickedImageID
 		m["keyframe_url"] = fmt.Sprintf("%s/v1/images/%d/file", base, s.PickedImageID)

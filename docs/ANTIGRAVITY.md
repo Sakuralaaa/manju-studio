@@ -103,6 +103,15 @@ description: 漫剧工坊外部编剧规则
 | `get_audio_link` | 音频的限时下载地址（2 小时，不需要密钥）+ 文件名、时长、念的文字：`sample(s)`、`asset_id`（`which` = `sample` / `refs` / `master` / `candidates`，默认全部）、`project_id`（旁白）、`library_id`、`line_id` |
 | `export_voice_candidates` | `project_id`（可选 `asset_ids`）：把各角色的设计候选、当前音色、原声参考、母带（和旁白）打成一个 zip，返回一个限时下载地址；包内文件名全是 ASCII（`C01_asset10_cand1_vd-xxx.wav`），附 `manifest.txt` / `manifest.json`（文件 → 角色、候选序号、原始样本名、时长、文字、是否当前绑定） |
 
+0.3.0：**丝滑短剧成片引擎、0 算力全集审图、H3 避坑质检与 ComfyUI 中断修复**。
+- **丝滑成片后期管线（`edit_engine.go` + `videos.go` + `capcut.go`）**：彻底解决 AI 5 秒原生片段硬拼接导致的「开头 2 秒静默发呆、切镜闪光、音量跳变、回合制死切」问题：
+  - **波形自动裁静音（`auto_trim`，默认开）**：自动检测有效声段裁掉 H3 开头 1.3–2.4s 静默起势与拖沓尾帧，同时让原生字幕紧贴开口时刻起止，并同步输出到剪映草稿（`export_capcut`）；
+  - **同场景 RGB 亮度/白平衡匹配（`shot_match`，默认开）**：按 `scene_group`（默认按主场景 `S*` 连续分段）拉齐中位曝光与色偏（`lutrgb` 强度 0.7），可选全局电影调色预设（`cinema_cool` / `cinema_warm` / `moody` / `noir`）；
+  - **音频黏合层（`audio_norm` + `audio_xfade` + J/L-Cut）**：逐镜响度均衡至 `-18 dBFS`，切点自动 `0.12s` 平滑叠化，支持真 J-Cut / L-Cut 声画错位（数学保证零口型漂移），完美配合 BGM 侧链闪避。
+- **新增 4 个 MCP 后期与质检工具**：`set_shot_edit`（单镜/批量设 `trim_start` / `trim_end` / `j_cut` / `l_cut` / `scene_group`）、`set_episode_edit`（配置本集丝滑成片参数）、`verify_final`（成片逐切点自动检测同场景亮度跳变 >20 与音频跳变 >10 dB）、`view_episode_keyframes`（纯 Go 生成带序号角标的整集关键帧总览拼图，0 算力开机前一次审完轴线/光线/服装）。
+- **H3 提示词安全护栏（`h3prompt.go`）**：自动把常见中文语气词与性别映射为英文减少 `<d>` 外汉字泄漏；`preview_shot_prompts` / `save_shots` / `update_shot` 自动检测 `<d>` 外大段中文（防 H3 误念动作说明）及实测阴间脸/糊屏触发词（`eyes flush red`、`unblinking`、`whip-pan`、`violently`、`turns around 180` 等）。
+- **Colab 取消任务僵尸占卡修复（`colab/job.py`）**：捕获 `KeyboardInterrupt` / `SystemExit` 与超时，立即向本机 ComfyUI 发 `/interrupt` + `/queue {"delete":[pid]}`，取消运行中任务不再僵尸占卡十几分钟。
+
 0.2.16：**Colab 分配状态与真实错误透出**：`colabCreateRuntime` 返回异步 Operation（`op.Name`），`bringUp` 轮询期间同步检查 `colabGetOp` 与 `Runtime.State`，Colab 异步拒绝分配（缺卡 / 配额 / 会话数上限等）在数秒内立即报出真实错误而不再白等 7.5 分钟；超时时也附带最后一次接口反馈；顺手修复 `preview_shot_prompts(shot_id)` 返回 `code` 为空及无效 `channel_id` 未报错的小问题。
 
 0.2.15：**全流程 Agent 实操卡点全打通**。

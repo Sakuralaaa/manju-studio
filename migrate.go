@@ -138,6 +138,17 @@ var addCols = []struct{ table, col, def string }{
 	{"assets", "vc_override", "TEXT NOT NULL DEFAULT '{}'"},
 	{"videos", "vc_override", "TEXT NOT NULL DEFAULT '{}'"},
 	{"pipelines", "pause_at", "TEXT NOT NULL DEFAULT '[]'"},
+	// 0.3.0 丝滑成片剪辑参数（自动裁首尾静音、同场景调色匹配、J/L-Cut 声画错位、音量均衡与风格调色）
+	{"shots", "trim_start", "REAL NOT NULL DEFAULT -1"},
+	{"shots", "trim_end", "REAL NOT NULL DEFAULT 0"},
+	{"shots", "j_cut", "REAL NOT NULL DEFAULT 0"},
+	{"shots", "l_cut", "REAL NOT NULL DEFAULT 0"},
+	{"shots", "scene_group", "TEXT NOT NULL DEFAULT ''"},
+	{"episodes", "auto_trim", "INTEGER NOT NULL DEFAULT 1"},
+	{"episodes", "shot_match", "INTEGER NOT NULL DEFAULT 1"},
+	{"episodes", "audio_xfade", "REAL NOT NULL DEFAULT 0.12"},
+	{"episodes", "audio_norm", "INTEGER NOT NULL DEFAULT 1"},
+	{"episodes", "color_grade", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func hasCol(table, col string) bool {

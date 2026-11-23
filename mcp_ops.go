@@ -28,8 +28,51 @@ var opsTools = []mcpTool{
 	{"queue_episode_videos", "批量排队一集的视频任务（不自动开机，遵守不消耗未授权算力的约束）。mode=missing（默认）只排缺视频的镜头；mode=all 全部重排。首尾帧镜头在上一镜头未完成时自动排为 waiting_prev，上一镜头完成后自动补首帧开跑。", obj(map[string]any{
 		"episode_id": num("集编号"), "mode": enumS("missing = 只排缺视频的镜头（默认）；all = 全部镜头重排", "missing", "all"),
 	}, "episode_id")},
-	{"build_final", "触发一集的成片合成任务（拼接所有镜头视频、混入配音/音效/配乐、烧录字幕），异步返回 task_id；用 get_task_status 查进度，完成后用 get_video_link（episode_id）下载成片。", obj(map[string]any{
-		"episode_id": num("集编号"), "subtitles": boolp("是否烧录字幕（可选，不填沿用本集当前设置）"),
+	{"build_final", "触发一集的丝滑成片合成任务（波形自动裁静音、同场景亮度/色偏匹配、响度均衡、切点平滑 crossfade + J/L-Cut 声画错位、混入配音/音效/配乐、烧录对齐字幕），异步返回 task_id；用 get_task_status 查进度，完成后用 verify_final 自动质检、用 get_video_link（episode_id）下载成片。", obj(map[string]any{
+		"episode_id":  num("集编号"),
+		"subtitles":   boolp("是否烧录字幕（可选，不填沿用本集设置）"),
+		"auto_trim":   boolp("是否开启波形自动裁首尾静音，消除 H3 开头 1.3–2.4s 僵硬静默（默认 true）"),
+		"shot_match":  boolp("是否开启同场景 RGB 亮度/白平衡自动匹配，消除切镜闪光（默认 true）"),
+		"audio_xfade": numF("切点音频平滑叠化秒数 0–0.5（默认 0.12）"),
+		"audio_norm":  boolp("是否开启逐镜响度均衡至 -18 dBFS（默认 true）"),
+		"color_grade": enumS("可选全局电影调色预设（统一整集质感）", "none", "cinema_cool", "cinema_warm", "moody", "noir"),
+	}, "episode_id")},
+	{"set_episode_edit", "配置一集的丝滑后期剪辑参数（波形自动裁静音、同场景调色匹配、切点音频 crossfade、逐镜响度均衡、全局电影调色预设、字幕开关），供 build_final 和 export_capcut 使用。", obj(map[string]any{
+		"episode_id":  num("集编号"),
+		"auto_trim":   boolp("波形自动裁首尾静音"),
+		"shot_match":  boolp("同场景 RGB 亮度/白平衡匹配"),
+		"audio_xfade": numF("切点音频平滑叠化秒数 0–0.5"),
+		"audio_norm":  boolp("逐镜响度均衡至 -18 dBFS"),
+		"color_grade": enumS("全局电影调色预设", "none", "cinema_cool", "cinema_warm", "moody", "noir"),
+		"subtitles":   boolp("是否烧录字幕"),
+	}, "episode_id")},
+	{"set_shot_edit", "设置单个或多个镜头的后期剪辑参数：手动入出点（trim_start / trim_end）、J-Cut（本镜声音提前切入上一镜秒数）、L-Cut（本镜声音延续到下一镜反应镜头秒数）以及同场景调色分组 scene_group。支持单镜传 shot_id，或批量传 episode_id + edits 数组一次改整集。", obj(map[string]any{
+		"shot_id":     num("单镜编号（与 edits 二选一）"),
+		"episode_id":  num("集编号（配合 code 或 edits 批量修改）"),
+		"code":        str("镜头序号，如 03"),
+		"trim_start":  numF("手动入点秒（<0 恢复自动裁静音；>=0 锁定精确入点）"),
+		"trim_end":    numF("手动出点秒（0 恢复自动/到尾）"),
+		"j_cut":       numF("J-Cut 声音提前秒数 0–2"),
+		"l_cut":       numF("L-Cut 声音延续秒数 0–2"),
+		"scene_group": str("同场景调色分组（如 S01-day / S01-dusk；空字符串恢复自动按场景资产分段）"),
+		"edits": arr("批量剪辑列表", obj(map[string]any{
+			"shot_id":     num("镜头编号"),
+			"code":        str("镜头序号，如 03（需同时传 episode_id）"),
+			"trim_start":  numF("手动入点秒"),
+			"trim_end":    numF("手动出点秒"),
+			"j_cut":       numF("J-Cut 秒数 0–2"),
+			"l_cut":       numF("L-Cut 秒数 0–2"),
+			"scene_group": str("场景分组"),
+		})),
+	})},
+	{"verify_final", "对一集已合成的成片自动做剪辑质量验收：输出每个镜头的实际裁切入出点与成片时段，并逐切点检测同场景亮度跳变（>20 告警）与音频电平跳变（>10 dB 告警）。", obj(map[string]any{
+		"episode_id": num("集编号"),
+	}, "episode_id")},
+	{"view_episode_keyframes", "0 算力一次审阅整集所有已选定关键帧：把整集关键帧拼成带镜头编号角标（01、02…）的连贯性总览拼图，便于开机出视频前一眼查出跨镜光线跳变、180° 轴线翻转、服装穿帮或脸型漂移。", obj(map[string]any{
+		"episode_id": num("集编号"),
+		"cols":       num("每行列数 1–6（可选，默认自动）"),
+		"max_edge":   num("拼图长边像素 512–4096（默认 2048）"),
+		"page":       num("超过 24 镜时分页查看（从 1 开始，默认 1）"),
 	}, "episode_id")},
 	{"generate_cover", "为一集生成海报封面（自动带主角和本集首场景作参考）。默认异步返回 task_id（wait=true 时等待出完并返回封面图片编号）。", obj(map[string]any{
 		"episode_id": num("集编号"), "title": str("封面主标题（可选，不填用作品标题）"), "wait": boolp("是否等出完再返回，默认 false"),
@@ -59,7 +102,12 @@ var opsTools = []mcpTool{
 		}, "speaker", "text"))}},
 		"assets":          arr("出现的资产编号或名称", map[string]any{"type": "string"}),
 		"transition":      enumS("衔接", "cut", "continuous", "first_last"),
-		"keyframe_prompt": str("关键帧中文生图提示词"), "video_prompt": str("视频描述"),
+		"scene_group":     str("同场景调色匹配分组（如 S01-day / S01-dusk，可选）"),
+		"trim_start":      numF("手动入点秒（可选）"),
+		"trim_end":        numF("手动出点秒（可选）"),
+		"j_cut":           numF("J-Cut 声音提前秒数 0–2（可选）"),
+		"l_cut":           numF("L-Cut 声音延续秒数 0–2（可选）"),
+		"keyframe_prompt": str("关键帧中文生图提示词"), "video_prompt": str("视频描述（推荐纯英文避免 H3 误念）"),
 	}, "episode_id", "duration", "camera", "picture", "keyframe_prompt", "video_prompt")},
 	{"delete_shot", "删除单个镜头（保留同集其他镜头的关键帧与视频）；会删掉该镜头的关键帧、取消排队视频并清理该镜配音文件。不可恢复：必须传 confirm=true，不传只预览。", obj(map[string]any{
 		"shot_id": num("镜头编号"), "confirm": boolp("确认删除"),
@@ -102,6 +150,14 @@ func callOpsTool(ctx context.Context, name string, args json.RawMessage, base st
 		return toolQueueEpisodeVideos(ctx, args)
 	case "build_final":
 		return toolBuildFinal(ctx, args)
+	case "set_episode_edit":
+		return toolSetEpisodeEdit(ctx, args)
+	case "set_shot_edit":
+		return toolSetShotEdit(ctx, args)
+	case "verify_final":
+		return toolVerifyFinal(ctx, args)
+	case "view_episode_keyframes":
+		return toolViewEpisodeKeyframes(ctx, args)
 	case "generate_cover":
 		return toolGenerateCover(ctx, args, base)
 	case "list_bgm":
@@ -223,8 +279,13 @@ func toolQueueEpisodeVideos(ctx context.Context, raw json.RawMessage) (any, erro
 
 func toolBuildFinal(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a struct {
-		EpisodeID int64 `json:"episode_id"`
-		Subtitles *bool `json:"subtitles"`
+		EpisodeID  int64    `json:"episode_id"`
+		Subtitles  *bool    `json:"subtitles"`
+		AutoTrim   *bool    `json:"auto_trim"`
+		ShotMatch  *bool    `json:"shot_match"`
+		AudioXfade *float64 `json:"audio_xfade"`
+		AudioNorm  *bool    `json:"audio_norm"`
+		ColorGrade *string  `json:"color_grade"`
 	}
 	if err := strictArgs(raw, &a); err != nil {
 		return nil, err
@@ -233,15 +294,248 @@ func toolBuildFinal(ctx context.Context, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.Subtitles != nil {
-		_, _ = db.Exec(`UPDATE episodes SET subtitles=? WHERE id=?`, b2i(*a.Subtitles), e.ID)
-		e.Subtitles = *a.Subtitles
+	if err := applyEpisodeEdit(e, a.Subtitles, a.AutoTrim, a.ShotMatch, a.AudioXfade, a.AudioNorm, a.ColorGrade); err != nil {
+		return nil, err
 	}
 	tid, err := finalTask(p, e)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "episode_id": e.ID, "task_id": tid, "note": "成片合成已启动；用 get_task_status 查进度，完成后用 get_video_link（episode_id）取下载链接。"}, nil
+	return map[string]any{
+		"ok": true, "episode_id": e.ID, "task_id": tid,
+		"settings": map[string]any{
+			"subtitles": e.Subtitles, "auto_trim": e.AutoTrim, "shot_match": e.ShotMatch,
+			"audio_xfade": e.AudioXfade, "audio_norm": e.AudioNorm, "color_grade": e.ColorGrade,
+		},
+		"note": "丝滑成片合成已启动；用 get_task_status 查进度，完成后用 verify_final 自动质检、用 get_video_link（episode_id）取下载链接。",
+	}, nil
+}
+
+func applyEpisodeEdit(e *Episode, subtitles, autoTrim, shotMatch *bool, audioXfade *float64, audioNorm *bool, colorGrade *string) error {
+	if colorGrade != nil && !validColorGrade(*colorGrade) {
+		return errors.New("color_grade 只能是 none / cinema_cool / cinema_warm / moody / noir")
+	}
+	if subtitles != nil {
+		_, _ = db.Exec(`UPDATE episodes SET subtitles=? WHERE id=?`, b2i(*subtitles), e.ID)
+		e.Subtitles = *subtitles
+	}
+	if autoTrim != nil {
+		_, _ = db.Exec(`UPDATE episodes SET auto_trim=? WHERE id=?`, b2i(*autoTrim), e.ID)
+		e.AutoTrim = *autoTrim
+	}
+	if shotMatch != nil {
+		_, _ = db.Exec(`UPDATE episodes SET shot_match=? WHERE id=?`, b2i(*shotMatch), e.ID)
+		e.ShotMatch = *shotMatch
+	}
+	if audioXfade != nil {
+		v := clampF(*audioXfade, 0, 0.5)
+		_, _ = db.Exec(`UPDATE episodes SET audio_xfade=? WHERE id=?`, v, e.ID)
+		e.AudioXfade = v
+	}
+	if audioNorm != nil {
+		_, _ = db.Exec(`UPDATE episodes SET audio_norm=? WHERE id=?`, b2i(*audioNorm), e.ID)
+		e.AudioNorm = *audioNorm
+	}
+	if colorGrade != nil {
+		g := strings.ToLower(strings.TrimSpace(*colorGrade))
+		if g == "none" {
+			g = ""
+		}
+		_, _ = db.Exec(`UPDATE episodes SET color_grade=? WHERE id=?`, g, e.ID)
+		e.ColorGrade = g
+	}
+	touchEpisode(e.ID)
+	return nil
+}
+
+func toolSetEpisodeEdit(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		EpisodeID  int64    `json:"episode_id"`
+		Subtitles  *bool    `json:"subtitles"`
+		AutoTrim   *bool    `json:"auto_trim"`
+		ShotMatch  *bool    `json:"shot_match"`
+		AudioXfade *float64 `json:"audio_xfade"`
+		AudioNorm  *bool    `json:"audio_norm"`
+		ColorGrade *string  `json:"color_grade"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	_, e, err := epCtx(a.EpisodeID)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyEpisodeEdit(e, a.Subtitles, a.AutoTrim, a.ShotMatch, a.AudioXfade, a.AudioNorm, a.ColorGrade); err != nil {
+		return nil, err
+	}
+	e, _ = getEpisode(e.ID)
+	return map[string]any{
+		"ok": true, "episode_id": e.ID,
+		"auto_trim": e.AutoTrim, "shot_match": e.ShotMatch, "audio_xfade": e.AudioXfade,
+		"audio_norm": e.AudioNorm, "color_grade": e.ColorGrade, "subtitles": e.Subtitles,
+	}, nil
+}
+
+type shotEditItem struct {
+	ShotID     int64    `json:"shot_id"`
+	Code       string   `json:"code"`
+	TrimStart  *float64 `json:"trim_start"`
+	TrimEnd    *float64 `json:"trim_end"`
+	JCut       *float64 `json:"j_cut"`
+	LCut       *float64 `json:"l_cut"`
+	SceneGroup *string  `json:"scene_group"`
+}
+
+func toolSetShotEdit(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		EpisodeID int64 `json:"episode_id"`
+		shotEditItem
+		Edits []shotEditItem `json:"edits"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	items := a.Edits
+	if len(items) == 0 {
+		items = []shotEditItem{a.shotEditItem}
+	}
+	updated := make([]map[string]any, 0, len(items))
+	touchedEps := map[int64]bool{}
+	for _, it := range items {
+		s, err := findShot(it.ShotID, a.EpisodeID, it.Code)
+		if err != nil {
+			return nil, err
+		}
+		if it.TrimStart != nil {
+			ts := *it.TrimStart
+			if ts < 0 {
+				ts = -1
+			}
+			_, _ = db.Exec(`UPDATE shots SET trim_start=? WHERE id=?`, ts, s.ID)
+		}
+		if it.TrimEnd != nil {
+			te := *it.TrimEnd
+			if te < 0 {
+				te = 0
+			}
+			_, _ = db.Exec(`UPDATE shots SET trim_end=? WHERE id=?`, te, s.ID)
+		}
+		if it.JCut != nil {
+			_, _ = db.Exec(`UPDATE shots SET j_cut=? WHERE id=?`, clampF(*it.JCut, 0, 2), s.ID)
+		}
+		if it.LCut != nil {
+			_, _ = db.Exec(`UPDATE shots SET l_cut=? WHERE id=?`, clampF(*it.LCut, 0, 2), s.ID)
+		}
+		if it.SceneGroup != nil {
+			_, _ = db.Exec(`UPDATE shots SET scene_group=? WHERE id=?`, strings.TrimSpace(*it.SceneGroup), s.ID)
+		}
+		touchedEps[s.EpisodeID] = true
+		s, _ = getShot(s.ID)
+		effG, _ := effectiveSceneGroup(s)
+		updated = append(updated, map[string]any{
+			"shot_id": s.ID, "code": s.Code, "trim_start": s.TrimStart, "trim_end": s.TrimEnd,
+			"j_cut": s.JCut, "l_cut": s.LCut, "scene_group": s.SceneGroup, "effective_scene_group": effG,
+		})
+	}
+	for eid := range touchedEps {
+		touchEpisode(eid)
+	}
+	if len(updated) == 1 && len(a.Edits) == 0 {
+		out := updated[0]
+		out["ok"] = true
+		return out, nil
+	}
+	return map[string]any{"ok": true, "updated": len(updated), "shots": updated}, nil
+}
+
+func toolVerifyFinal(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		EpisodeID int64 `json:"episode_id"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	p, e, err := epCtx(a.EpisodeID)
+	if err != nil {
+		return nil, err
+	}
+	return verifyFinalEpisode(ctx, p, e)
+}
+
+func toolViewEpisodeKeyframes(ctx context.Context, raw json.RawMessage) (any, error) {
+	var a struct {
+		EpisodeID int64 `json:"episode_id"`
+		Cols      int   `json:"cols"`
+		MaxEdge   int   `json:"max_edge"`
+		Page      int   `json:"page"`
+	}
+	if err := strictArgs(raw, &a); err != nil {
+		return nil, err
+	}
+	_, e, err := epCtx(a.EpisodeID)
+	if err != nil {
+		return nil, err
+	}
+	shots := listShots(e.ID, false)
+	if len(shots) == 0 {
+		return nil, errors.New("这一集还没有分镜")
+	}
+	const perPage = 24
+	page := a.Page
+	if page <= 0 {
+		page = 1
+	}
+	totalPages := (len(shots) + perPage - 1) / perPage
+	if page > totalPages {
+		page = totalPages
+	}
+	startIdx := (page - 1) * perPage
+	endIdx := min(len(shots), startIdx+perPage)
+	var frames []labeledFrame
+	var missing []string
+	var meta []map[string]any
+	for _, s := range shots[startIdx:endIdx] {
+		effG, _ := effectiveSceneGroup(s)
+		it := map[string]any{
+			"shot_id": s.ID, "code": s.Code, "scene_group": effG, "assets": s.Assets,
+			"picked_image_id": s.PickedImageID, "camera": s.Camera,
+		}
+		if s.PickedImageID > 0 {
+			if im, err := getImage(s.PickedImageID); err == nil {
+				if data, err := os.ReadFile(filepath.Join(dataDir, "images", im.File)); err == nil {
+					frames = append(frames, labeledFrame{Code: s.Code, Data: data})
+					it["included"] = true
+				}
+			}
+		}
+		if it["included"] != true {
+			missing = append(missing, s.Code)
+		}
+		meta = append(meta, it)
+	}
+	if len(frames) == 0 {
+		return nil, errors.New("当前分页里还没有生成任何关键帧")
+	}
+	jpg, err := buildLabeledContactSheet(frames, a.Cols, a.MaxEdge)
+	if err != nil {
+		return nil, err
+	}
+	head := fmt.Sprintf("第 %d 集关键帧连贯性总览（第 %d/%d 页，共拼接 %d 张，左上角数字为镜头序号）。请核对同场景人物脸型/服装、180° 视线与光源方向是否一致。",
+		e.No, page, totalPages, len(frames))
+	if len(missing) > 0 {
+		head += "\n缺少关键帧的镜头：" + strings.Join(missing, "、")
+	}
+	blocks := []any{
+		textBlock(head),
+		map[string]any{"type": "image", "data": base64.StdEncoding.EncodeToString(jpg), "mimeType": "image/jpeg"},
+	}
+	return &mcpRich{
+		Blocks: blocks,
+		Structured: map[string]any{
+			"episode_id": e.ID, "page": page, "total_pages": totalPages,
+			"included": len(frames), "missing_codes": nonNil(missing), "shots": meta,
+		},
+	}, nil
 }
 
 func toolGenerateCover(ctx context.Context, raw json.RawMessage, base string) (any, error) {
@@ -581,8 +875,23 @@ func toolAddShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	if sortPos == 1 && chain != "off" {
 		chain = "off"
 	}
-	res, err := db.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, e.ID, sortPos, d, strings.TrimSpace(a.Camera), act, dia, mustJSON(codes), kp, vp, chain, now())
+	ts := -1.0
+	if a.TrimStart != nil && *a.TrimStart >= 0 {
+		ts = *a.TrimStart
+	}
+	te := 0.0
+	if a.TrimEnd != nil && *a.TrimEnd > 0 {
+		te = *a.TrimEnd
+	}
+	jc, lc := 0.0, 0.0
+	if a.JCut != nil {
+		jc = clampF(*a.JCut, 0, 2)
+	}
+	if a.LCut != nil {
+		lc = clampF(*a.LCut, 0, 2)
+	}
+	res, err := db.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,scene_group,trim_start,trim_end,j_cut,l_cut,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, e.ID, sortPos, d, strings.TrimSpace(a.Camera), act, dia, mustJSON(codes), kp, vp, chain, strings.TrimSpace(a.SceneGroup), ts, te, jc, lc, now())
 	if err != nil {
 		return nil, err
 	}
@@ -766,10 +1075,13 @@ func toolPreviewShotPrompts(ctx context.Context, raw json.RawMessage) (any, erro
 		if s.PickedImageID == 0 {
 			warn = append(warn, "尚无关键帧")
 		}
+		warn = append(warn, h3PromptWarnings(vp, p.AudioMode != "dub")...)
+		effG, _ := effectiveSceneGroup(s)
 		items = append(items, map[string]any{
 			"shot_id":              s.ID,
 			"code":                 s.Code,
 			"chain":                s.Chain,
+			"scene_group":          effG,
 			"seconds":              sec,
 			"image_model":          model,
 			"max_refs":             refLimit(ch),

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -634,13 +635,17 @@ type tlLine struct {
 }
 
 type tlClip struct {
-	Shot  *Shot
-	Video *Video
-	Path  string
-	Info  clipInfo
-	Start float64
-	Lines []tlLine
-	Subs  []tlLine // 字幕时段（无配音时按台词均分）
+	Shot      *Shot
+	Video     *Video
+	Path      string
+	Info      clipInfo
+	Start     float64     // 在成片时间线上的起点
+	TrimStart float64     // 源视频裁切入点
+	TrimEnd   float64     // 源视频裁切出点
+	Dur       float64     // 裁切后有效画面时长（TrimEnd - TrimStart）
+	Span      audibleSpan // 原始视频有效人声/有声区间与 RMS
+	Lines     []tlLine
+	Subs      []tlLine // 字幕时段（无配音时按有声区间与台词字数对齐）
 }
 
 type timeline struct {
@@ -674,7 +679,20 @@ func buildTimeline(p *Project, e *Episode) (*timeline, error) {
 		if err != nil {
 			return nil, fmt.Errorf("镜头 %s：%s", s.Code, err.Error())
 		}
-		c := &tlClip{Shot: s, Video: v, Path: path, Info: ci, Start: tl.Total}
+		parsed := parseDialogue(s.Dialogue)
+		hasDial := len(parsed) > 0
+		var span audibleSpan
+		if ci.hasAudio && (e.AutoTrim || e.AudioNorm || (!tl.Dub && hasDial)) {
+			span = probeAudibleSpan(path)
+		}
+		// 配音模式下不使用原声自动裁短（以免配音塞不下），仅尊重手动 trim_start/trim_end
+		autoTrimClip := e.AutoTrim && !tl.Dub
+		tStart, tEnd := computeClipTrim(ci.dur, hasDial, s.TrimStart, s.TrimEnd, s.LCut, autoTrimClip, span)
+		clipDur := round3(math.Max(0.1, tEnd-tStart))
+		c := &tlClip{
+			Shot: s, Video: v, Path: path, Info: ci,
+			Start: tl.Total, TrimStart: tStart, TrimEnd: tEnd, Dur: clipDur, Span: span,
+		}
 		ls := byShot[s.ID]
 		if tl.Dub && len(ls) > 0 {
 			// 逐句排开：开头留 0.3 秒，句间 0.25 秒；超出镜头时先压缩间隔，再整体加速（最多 1.5 倍）
@@ -683,7 +701,10 @@ func buildTimeline(p *Project, e *Episode) (*timeline, error) {
 				speech += l.Duration
 			}
 			gap := 0.25
-			avail := ci.dur - 0.5
+			avail := clipDur - 0.5
+			if avail < 0.5 {
+				avail = clipDur
+			}
 			if speech+gap*float64(len(ls)-1) > avail {
 				gap = 0.08
 			}
@@ -695,6 +716,9 @@ func buildTimeline(p *Project, e *Episode) (*timeline, error) {
 				}
 			}
 			t := 0.3
+			if t > clipDur*0.15 {
+				t = 0.1
+			}
 			for _, l := range ls {
 				d := l.Duration / tempo
 				if l.AudioFile != "" {
@@ -703,11 +727,22 @@ func buildTimeline(p *Project, e *Episode) (*timeline, error) {
 				c.Subs = append(c.Subs, tlLine{L: l, Start: t, Dur: d})
 				t += d + gap
 			}
-		} else {
-			c.Subs = allocateNativeSubs(parseDialogue(s.Dialogue), ci.dur)
+		} else if hasDial {
+			// 原声模式：若波形检测到真实人声段，将字幕紧贴开口时刻起止，不再在静音起势段提前弹出
+			if span.OK {
+				subStart := math.Max(0, span.HeadSec-tStart)
+				subEnd := math.Min(clipDur, math.Max(subStart+0.4, span.TailSec-tStart+0.15))
+				subs := allocateNativeSubs(parsed, subEnd-subStart)
+				for i := range subs {
+					subs[i].Start = round3(subs[i].Start + subStart)
+				}
+				c.Subs = subs
+			} else {
+				c.Subs = allocateNativeSubs(parsed, clipDur)
+			}
 		}
 		tl.Clips = append(tl.Clips, c)
-		tl.Total += ci.dur
+		tl.Total = round3(tl.Total + clipDur)
 	}
 	if missing > 0 {
 		return nil, fmt.Errorf("还有 %d 个镜头没有视频", missing)
@@ -735,12 +770,42 @@ func handleFinalBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Subtitles *bool `json:"subtitles"`
+		Subtitles  *bool    `json:"subtitles"`
+		AutoTrim   *bool    `json:"auto_trim"`
+		ShotMatch  *bool    `json:"shot_match"`
+		AudioXfade *float64 `json:"audio_xfade"`
+		AudioNorm  *bool    `json:"audio_norm"`
+		ColorGrade *string  `json:"color_grade"`
 	}
 	_ = readJSON(r, &in)
 	if in.Subtitles != nil {
 		_, _ = db.Exec(`UPDATE episodes SET subtitles=? WHERE id=?`, b2i(*in.Subtitles), e.ID)
 		e.Subtitles = *in.Subtitles
+	}
+	if in.AutoTrim != nil {
+		_, _ = db.Exec(`UPDATE episodes SET auto_trim=? WHERE id=?`, b2i(*in.AutoTrim), e.ID)
+		e.AutoTrim = *in.AutoTrim
+	}
+	if in.ShotMatch != nil {
+		_, _ = db.Exec(`UPDATE episodes SET shot_match=? WHERE id=?`, b2i(*in.ShotMatch), e.ID)
+		e.ShotMatch = *in.ShotMatch
+	}
+	if in.AudioXfade != nil {
+		v := clampF(*in.AudioXfade, 0, 0.5)
+		_, _ = db.Exec(`UPDATE episodes SET audio_xfade=? WHERE id=?`, v, e.ID)
+		e.AudioXfade = v
+	}
+	if in.AudioNorm != nil {
+		_, _ = db.Exec(`UPDATE episodes SET audio_norm=? WHERE id=?`, b2i(*in.AudioNorm), e.ID)
+		e.AudioNorm = *in.AudioNorm
+	}
+	if in.ColorGrade != nil && validColorGrade(*in.ColorGrade) {
+		g := strings.ToLower(strings.TrimSpace(*in.ColorGrade))
+		if g == "none" {
+			g = ""
+		}
+		_, _ = db.Exec(`UPDATE episodes SET color_grade=? WHERE id=?`, g, e.ID)
+		e.ColorGrade = g
 	}
 	tid, err := finalTask(p, e)
 	if err != nil {
@@ -860,8 +925,11 @@ func runFF(ctx context.Context, what string, args ...string) error {
 	return nil
 }
 
-// buildFinal：逐镜头统一画面（可选 1080p lanczos 放大、烧录字幕）并混好镜头声（原声 × 音量 + 音效）
-// → 拼接 → 叠加配音轨 → 配乐（循环、淡入淡出、对白时自动压低）
+// buildFinal（0.3.0 丝滑成片管线）：
+//  1. 同场景 RGB 亮度/白平衡匹配（shot_match）+ 可选全局电影调色（color_grade）；
+//  2. 按波形自动裁切或手动入出点（TrimStart..TrimEnd）逐镜渲染纯画面轨 + 烧录精准对齐字幕，无损拼接 video_only.mp4；
+//  3. 独立音频黏合层：逐镜响度均衡至 -18 dBFS（audio_norm）+ 切点平滑 crossfade（audio_xfade）+ 真 J-Cut / L-Cut 声画错位 + 音效轨；
+//  4. 叠加配音轨（dub 模式）+ 配乐轨（循环、淡入淡出、对白自动 sidechain 压低）+ alimiter 混成最终成片。
 func buildFinal(ctx context.Context, tl *timeline) (string, error) {
 	p, e := tl.P, tl.E
 	tmp, err := os.MkdirTemp(filepath.Join(dataDir, "tmp"), "final-")
@@ -874,6 +942,25 @@ func buildFinal(ctx context.Context, tl *timeline) (string, error) {
 	if tl.Dub {
 		origVol = p.OrigVolume
 	}
+
+	// 1. 同场景亮度/色偏匹配预分析
+	matchFilters := make([]string, len(tl.Clips))
+	if e.ShotMatch && len(tl.Clips) >= 2 {
+		groups := make([]string, len(tl.Clips))
+		explicit := make([]bool, len(tl.Clips))
+		stats := make([]rgbStats, len(tl.Clips))
+		for i, c := range tl.Clips {
+			g, exp := effectiveSceneGroup(c.Shot)
+			groups[i], explicit[i] = g, exp
+			if g != "" {
+				stats[i] = probeClipRGB(c.Path, c.TrimStart, c.TrimEnd)
+			}
+		}
+		matchFilters = planShotMatch(groups, explicit, stats, 0.7)
+	}
+	gradeFilter := colorGradeFilter(e.ColorGrade)
+
+	// 2. 逐镜渲染纯画面轨（裁切 + 调色匹配 + 全局调色 + 缩放 24fps + 字幕）
 	var list strings.Builder
 	var srt strings.Builder
 	cue := 1
@@ -883,64 +970,130 @@ func buildFinal(ctx context.Context, tl *timeline) (string, error) {
 			var cs strings.Builder
 			for k, sl := range c.Subs {
 				a, b := sl.Start, sl.Start+sl.Dur
-				if b > c.Info.dur {
-					b = c.Info.dur
+				if b > c.Dur {
+					b = c.Dur
+				}
+				if b <= a+0.02 {
+					continue
 				}
 				fmt.Fprintf(&cs, "%d\n%s --> %s\n%s\n\n", k+1, srtTime(a), srtTime(b), sl.L.Text)
 				fmt.Fprintf(&srt, "%d\n%s --> %s\n%s\n\n", cue, srtTime(c.Start+a), srtTime(c.Start+b), sl.L.Text)
 				cue++
 			}
-			clipSrt = filepath.Join(tmp, fmt.Sprintf("c%03d.srt", i))
-			_ = os.WriteFile(clipSrt, []byte(cs.String()), 0o644)
+			if cs.Len() > 0 {
+				clipSrt = filepath.Join(tmp, fmt.Sprintf("c%03d.srt", i))
+				_ = os.WriteFile(clipSrt, []byte(cs.String()), 0o644)
+			}
 		}
-		vf := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=24,format=yuv420p", W, H, W, H)
+		vfParts := []string{
+			fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=24", W, H, W, H),
+		}
+		if matchFilters[i] != "" {
+			vfParts = append(vfParts, matchFilters[i])
+		}
+		if gradeFilter != "" {
+			vfParts = append(vfParts, gradeFilter)
+		}
+		vfParts = append(vfParts, "format=yuv420p")
 		if e.Subtitles && clipSrt != "" {
 			pw, ph, fs, mv := subtitleStyle(W, H)
 			style := fmt.Sprintf("FontName=Noto Sans CJK SC,FontSize=%d,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.2,Shadow=0,MarginV=%d", fs, mv)
-			vf += ",subtitles=" + ffEscape(clipSrt) + ":original_size=" + fmt.Sprintf("%dx%d", pw, ph) + ":force_style='" + style + "'"
+			vfParts = append(vfParts, "subtitles="+ffEscape(clipSrt)+":original_size="+fmt.Sprintf("%dx%d", pw, ph)+":force_style='"+style+"'")
 		}
-		out := filepath.Join(tmp, fmt.Sprintf("c%03d.mp4", i))
-		args := []string{"-i", c.Path}
-		var af []string
-		inputs := 1
-		base := "[0:a]"
-		if !c.Info.hasAudio {
-			args = append(args, "-f", "lavfi", "-t", fmt.Sprintf("%.3f", c.Info.dur), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000")
-			base = fmt.Sprintf("[%d:a]", inputs)
-			inputs++
+		out := filepath.Join(tmp, fmt.Sprintf("v%03d.mp4", i))
+		var args []string
+		if c.TrimStart > 0.005 {
+			args = append(args, "-ss", fmt.Sprintf("%.3f", c.TrimStart))
 		}
-		af = append(af, fmt.Sprintf("%saresample=48000,aformat=channel_layouts=stereo,volume=%.3f[base]", base, origVol))
-		mix := "[base]"
-		n := 1
-		if c.Shot.SfxFile != "" {
-			args = append(args, "-i", filepath.Join(dataDir, "audio", c.Shot.SfxFile))
-			af = append(af, fmt.Sprintf("[%d:a]aresample=48000,aformat=channel_layouts=stereo,volume=%.3f[sfx]", inputs, c.Shot.SfxVolume))
-			inputs++
-			mix += "[sfx]"
-			n++
-		}
-		if n > 1 {
-			af = append(af, fmt.Sprintf("%samix=inputs=%d:duration=first:normalize=0[aout]", mix, n))
-		} else {
-			af = append(af, "[base]anull[aout]")
-		}
-		args = append(args, "-filter_complex", strings.Join(af, ";"), "-vf", vf, "-map", "0:v:0", "-map", "[aout]", "-t", fmt.Sprintf("%.3f", c.Info.dur),
-			"-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-movflags", "+faststart", out)
-		if err := runFF(ctx, fmt.Sprintf("处理镜头 %s ", c.Shot.Code), args...); err != nil {
+		args = append(args, "-i", c.Path, "-t", fmt.Sprintf("%.3f", c.Dur),
+			"-vf", strings.Join(vfParts, ","), "-an",
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-movflags", "+faststart", out)
+		if err := runFF(ctx, fmt.Sprintf("处理镜头画面 %s ", c.Shot.Code), args...); err != nil {
 			return "", err
 		}
 		fmt.Fprintf(&list, "file '%s'\n", out)
 	}
 	listFile := filepath.Join(tmp, "list.txt")
 	_ = os.WriteFile(listFile, []byte(list.String()), 0o644)
-	joined := filepath.Join(tmp, "joined.mp4")
-	if err := runFF(ctx, "拼接", "-f", "concat", "-safe", "0", "-i", listFile, "-c", "copy", "-movflags", "+faststart", joined); err != nil {
+	videoOnly := filepath.Join(tmp, "video_only.mp4")
+	if err := runFF(ctx, "拼接画面", "-f", "concat", "-safe", "0", "-i", listFile, "-c", "copy", "-movflags", "+faststart", videoOnly); err != nil {
 		return "", err
 	}
+
+	// 3. 音频黏合层：每镜独立截取音频（带 J/L-Cut 与 crossfade 缓冲句柄）+ 响度均衡 + 淡入淡出 + 音效，按时间线精确混音
+	var aInputs []string
+	var aFilters []string
+	var aMixTags []string
+	aIdx := 0
+	for i, c := range tl.Clips {
+		if c.Info.hasAudio && origVol > 0.001 {
+			prevDur, nextDur := 0.0, 0.0
+			if i > 0 {
+				prevDur = tl.Clips[i-1].Dur
+			}
+			if i < len(tl.Clips)-1 {
+				nextDur = tl.Clips[i+1].Dur
+			}
+			normDB := 0.0
+			if e.AudioNorm && !tl.Dub {
+				normDB = computeNormGainDB(c.Span, len(parseDialogue(c.Shot.Dialogue)) > 0)
+			}
+			pl := computeAudioPlacement(i, len(tl.Clips), c.Start, c.TrimStart, c.TrimEnd, c.Info.dur, prevDur, nextDur, c.Shot.JCut, c.Shot.LCut, e.AudioXfade, origVol, normDB)
+			if pl.SrcDur > 0.05 {
+				segWav := filepath.Join(tmp, fmt.Sprintf("a%03d.wav", i))
+				af := fmt.Sprintf("aresample=48000,aformat=channel_layouts=stereo,volume=%.4f", pl.GainLin)
+				if pl.FadeIn > 0.005 {
+					af += fmt.Sprintf(",afade=t=in:st=0:d=%.3f", pl.FadeIn)
+				}
+				if pl.FadeOut > 0.005 && pl.SrcDur > pl.FadeOut+0.01 {
+					af += fmt.Sprintf(",afade=t=out:st=%.3f:d=%.3f", pl.SrcDur-pl.FadeOut, pl.FadeOut)
+				}
+				sArgs := []string{}
+				if pl.SrcStart > 0.005 {
+					sArgs = append(sArgs, "-ss", fmt.Sprintf("%.3f", pl.SrcStart))
+				}
+				sArgs = append(sArgs, "-i", c.Path, "-t", fmt.Sprintf("%.3f", pl.SrcDur), "-vn", "-af", af, "-ar", "48000", "-ac", "2", segWav)
+				if err := runFF(ctx, fmt.Sprintf("处理镜头音频 %s ", c.Shot.Code), sArgs...); err != nil {
+					return "", err
+				}
+				aInputs = append(aInputs, "-i", segWav)
+				tag := fmt.Sprintf("[ca%d]", aIdx)
+				delayMs := int(math.Round(pl.TimeStart * 1000))
+				aFilters = append(aFilters, fmt.Sprintf("[%d:a]adelay=delays=%d:all=1%s", aIdx, delayMs, tag))
+				aMixTags = append(aMixTags, tag)
+				aIdx++
+			}
+		}
+		if c.Shot.SfxFile != "" && c.Shot.SfxVolume > 0.001 {
+			sfxPath := filepath.Join(dataDir, "audio", c.Shot.SfxFile)
+			aInputs = append(aInputs, "-i", sfxPath)
+			tag := fmt.Sprintf("[sx%d]", aIdx)
+			delayMs := int(math.Round(c.Start * 1000))
+			aFilters = append(aFilters, fmt.Sprintf("[%d:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:%.3f,asetpts=N/SR/TB,volume=%.3f,adelay=delays=%d:all=1%s",
+				aIdx, c.Dur, c.Shot.SfxVolume, delayMs, tag))
+			aMixTags = append(aMixTags, tag)
+			aIdx++
+		}
+	}
+
+	clipAudio := filepath.Join(tmp, "clips_audio.wav")
+	if aIdx == 0 {
+		if err := runFF(ctx, "生成静音底轨", "-f", "lavfi", "-t", fmt.Sprintf("%.3f", tl.Total), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-ar", "48000", "-ac", "2", clipAudio); err != nil {
+			return "", err
+		}
+	} else {
+		aFilters = append(aFilters, fmt.Sprintf("%samix=inputs=%d:duration=longest:normalize=0,apad,atrim=0:%.3f,alimiter=limit=0.95[caout]",
+			strings.Join(aMixTags, ""), len(aMixTags), tl.Total))
+		mixArgs := append(aInputs, "-filter_complex", strings.Join(aFilters, ";"), "-map", "[caout]", "-ar", "48000", "-ac", "2", clipAudio)
+		if err := runFF(ctx, "混合镜头音频", mixArgs...); err != nil {
+			return "", err
+		}
+	}
+
 	name := fmt.Sprintf("final-%d-e%d-%s.mp4", p.ID, e.No, randHex(4))
 	dst := filepath.Join(dataDir, "videos", name)
 
-	// 配音轨
+	// 4. 配音轨（dub 模式）
 	voice := ""
 	if tl.Dub {
 		var vin []string
@@ -971,60 +1124,60 @@ func buildFinal(ctx context.Context, tl *timeline) (string, error) {
 			}
 		}
 	}
+
+	// 5. 最终合流（画面 + 镜头声 + 配音 + 配乐/侧链闪避 + 限幅）
 	var bgm *Bgm
 	if e.BgmID > 0 {
 		bgm, _ = getBgm(e.BgmID)
 	}
-	if voice == "" && bgm == nil {
-		if err := os.Rename(joined, dst); err != nil {
-			return "", err
+	args := []string{"-i", videoOnly, "-i", clipAudio}
+	fc := []string{"[1:a]aresample=48000,aformat=channel_layouts=stereo[clip]"}
+	mix := []string{"[clip]"}
+	idx := 2
+	key := ""
+	if voice != "" {
+		args = append(args, "-i", voice)
+		if bgm != nil && e.BgmDuck {
+			fc = append(fc, fmt.Sprintf("[%d:a]asplit=2[vo1][vk]", idx))
+			key = "[vk]"
+		} else {
+			fc = append(fc, fmt.Sprintf("[%d:a]anull[vo1]", idx))
 		}
+		mix = append(mix, "[vo1]")
+		idx++
+	}
+	if bgm != nil {
+		args = append(args, "-stream_loop", "-1", "-i", filepath.Join(dataDir, "audio", bgm.File))
+		f := fmt.Sprintf("[%d:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:%.3f,asetpts=N/SR/TB,volume=%.3f", idx, tl.Total, e.BgmVolume)
+		if e.BgmFadeIn > 0 {
+			f += fmt.Sprintf(",afade=t=in:st=0:d=%.2f", e.BgmFadeIn)
+		}
+		if e.BgmFadeOut > 0 && tl.Total > e.BgmFadeOut {
+			f += fmt.Sprintf(",afade=t=out:st=%.3f:d=%.2f", tl.Total-e.BgmFadeOut, e.BgmFadeOut)
+		}
+		idx++
+		if e.BgmDuck {
+			if key == "" {
+				// 原声模式：用镜头声（含 H3 对白）做压低的触发
+				fc[0] = "[1:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[clip][ck]"
+				key = "[ck]"
+			}
+			fc = append(fc, f+"[bg]", "[bg]"+key+"sidechaincompress=threshold=0.02:ratio=6:attack=15:release=450:makeup=1[bgd]")
+			mix = append(mix, "[bgd]")
+		} else {
+			fc = append(fc, f+"[bgd]")
+			mix = append(mix, "[bgd]")
+		}
+	}
+	if len(mix) == 1 {
+		fc = append(fc, "[clip]alimiter=limit=0.95[out]")
 	} else {
-		args := []string{"-i", joined}
-		fc := []string{"[0:a]aresample=48000,aformat=channel_layouts=stereo[clip]"}
-		mix := []string{"[clip]"}
-		idx := 1
-		key := ""
-		if voice != "" {
-			args = append(args, "-i", voice)
-			if bgm != nil && e.BgmDuck {
-				fc = append(fc, fmt.Sprintf("[%d:a]asplit=2[vo1][vk]", idx))
-				key = "[vk]"
-			} else {
-				fc = append(fc, fmt.Sprintf("[%d:a]anull[vo1]", idx))
-			}
-			mix = append(mix, "[vo1]")
-			idx++
-		}
-		if bgm != nil {
-			args = append(args, "-stream_loop", "-1", "-i", filepath.Join(dataDir, "audio", bgm.File))
-			f := fmt.Sprintf("[%d:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:%.3f,asetpts=N/SR/TB,volume=%.3f", idx, tl.Total, e.BgmVolume)
-			if e.BgmFadeIn > 0 {
-				f += fmt.Sprintf(",afade=t=in:st=0:d=%.2f", e.BgmFadeIn)
-			}
-			if e.BgmFadeOut > 0 && tl.Total > e.BgmFadeOut {
-				f += fmt.Sprintf(",afade=t=out:st=%.3f:d=%.2f", tl.Total-e.BgmFadeOut, e.BgmFadeOut)
-			}
-			idx++
-			if e.BgmDuck {
-				if key == "" {
-					// 原声模式：用镜头声（含 H3 对白）做压低的触发
-					fc[0] = "[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[clip][ck]"
-					key = "[ck]"
-				}
-				fc = append(fc, f+"[bg]", "[bg]"+key+"sidechaincompress=threshold=0.02:ratio=6:attack=15:release=450:makeup=1[bgd]")
-				mix = append(mix, "[bgd]")
-			} else {
-				fc = append(fc, f+"[bgd]")
-				mix = append(mix, "[bgd]")
-			}
-		}
 		fc = append(fc, fmt.Sprintf("%samix=inputs=%d:duration=first:normalize=0,alimiter=limit=0.95[out]", strings.Join(mix, ""), len(mix)))
-		args = append(args, "-filter_complex", strings.Join(fc, ";"), "-map", "0:v:0", "-map", "[out]", "-t", fmt.Sprintf("%.3f", tl.Total),
-			"-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", dst)
-		if err := runFF(ctx, "混音", args...); err != nil {
-			return "", err
-		}
+	}
+	args = append(args, "-filter_complex", strings.Join(fc, ";"), "-map", "0:v:0", "-map", "[out]", "-t", fmt.Sprintf("%.3f", tl.Total),
+		"-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", dst)
+	if err := runFF(ctx, "混音合成成片", args...); err != nil {
+		return "", err
 	}
 	if srt.Len() > 0 {
 		_ = os.WriteFile(strings.TrimSuffix(dst, ".mp4")+".srt", []byte(srt.String()), 0o644)

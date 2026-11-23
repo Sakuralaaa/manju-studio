@@ -112,19 +112,25 @@ type Episode struct {
 	BgmFadeOut   float64 `json:"bgm_fade_out"`
 	BgmDuck      bool    `json:"bgm_duck"`
 	Subtitles    bool    `json:"subtitles"`
+	AutoTrim     bool    `json:"auto_trim"`
+	ShotMatch    bool    `json:"shot_match"`
+	AudioXfade   float64 `json:"audio_xfade"`
+	AudioNorm    bool    `json:"audio_norm"`
+	ColorGrade   string  `json:"color_grade"`
 	CreatedAt    int64   `json:"created_at"`
 	UpdatedAt    int64   `json:"updated_at"`
 }
 
-const epCols = `id,project_id,no,title,idea,script,summary,cliffhanger,final_file,final_at,cover_image_id,bgm_id,bgm_volume,bgm_fade_in,bgm_fade_out,bgm_duck,subtitles,created_at,updated_at`
+const epCols = `id,project_id,no,title,idea,script,summary,cliffhanger,final_file,final_at,cover_image_id,bgm_id,bgm_volume,bgm_fade_in,bgm_fade_out,bgm_duck,subtitles,auto_trim,shot_match,audio_xfade,audio_norm,color_grade,created_at,updated_at`
 
 func scanEpisode(sc interface{ Scan(...any) error }) (*Episode, error) {
 	var e Episode
-	var duck, subs int
-	if err := sc.Scan(&e.ID, &e.ProjectID, &e.No, &e.Title, &e.Idea, &e.Script, &e.Summary, &e.Cliffhanger, &e.FinalFile, &e.FinalAt, &e.CoverImageID, &e.BgmID, &e.BgmVolume, &e.BgmFadeIn, &e.BgmFadeOut, &duck, &subs, &e.CreatedAt, &e.UpdatedAt); err != nil {
+	var duck, subs, autoTrim, shotMatch, audioNorm int
+	if err := sc.Scan(&e.ID, &e.ProjectID, &e.No, &e.Title, &e.Idea, &e.Script, &e.Summary, &e.Cliffhanger, &e.FinalFile, &e.FinalAt, &e.CoverImageID, &e.BgmID, &e.BgmVolume, &e.BgmFadeIn, &e.BgmFadeOut, &duck, &subs, &autoTrim, &shotMatch, &e.AudioXfade, &audioNorm, &e.ColorGrade, &e.CreatedAt, &e.UpdatedAt); err != nil {
 		return nil, err
 	}
 	e.BgmDuck, e.Subtitles = duck == 1, subs == 1
+	e.AutoTrim, e.ShotMatch, e.AudioNorm = autoTrim == 1, shotMatch == 1, audioNorm == 1
 	if e.FinalFile != "" {
 		e.FinalURL = "/files/videos/" + e.FinalFile
 	}
@@ -611,6 +617,11 @@ type episodeIn struct {
 	BgmFadeOut *float64 `json:"bgm_fade_out"`
 	BgmDuck    *bool    `json:"bgm_duck"`
 	Subtitles  *bool    `json:"subtitles"`
+	AutoTrim   *bool    `json:"auto_trim"`
+	ShotMatch  *bool    `json:"shot_match"`
+	AudioXfade *float64 `json:"audio_xfade"`
+	AudioNorm  *bool    `json:"audio_norm"`
+	ColorGrade *string  `json:"color_grade"`
 }
 
 func handleEpisodeUpdate(w http.ResponseWriter, r *http.Request) {
@@ -660,6 +671,25 @@ func handleEpisodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Subtitles != nil {
 		set("subtitles", b2i(*in.Subtitles))
+	}
+	if in.AutoTrim != nil {
+		set("auto_trim", b2i(*in.AutoTrim))
+	}
+	if in.ShotMatch != nil {
+		set("shot_match", b2i(*in.ShotMatch))
+	}
+	if in.AudioXfade != nil {
+		set("audio_xfade", clampF(*in.AudioXfade, 0, 0.5))
+	}
+	if in.AudioNorm != nil {
+		set("audio_norm", b2i(*in.AudioNorm))
+	}
+	if in.ColorGrade != nil && validColorGrade(*in.ColorGrade) {
+		g := strings.ToLower(strings.TrimSpace(*in.ColorGrade))
+		if g == "none" {
+			g = ""
+		}
+		set("color_grade", g)
 	}
 	touchEpisode(e.ID)
 	e, _ = getEpisode(e.ID)

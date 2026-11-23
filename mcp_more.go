@@ -64,8 +64,13 @@ var moreTools = []mcpTool{
 		}, "speaker", "text"))}},
 		"assets":     arr("出现的资产编号或名称（整体替换这个镜头的资产列表）", map[string]any{"type": "string"}),
 		"duration":   num("时长 5–10 秒"),
-		"transition": enumS("衔接", "cut", "continuous", "first_last"),
-		"ref_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "这个镜头的手动参考图编号（构图、姿势、道具），最多 4 张；传空数组清掉"},
+		"transition":  enumS("衔接", "cut", "continuous", "first_last"),
+		"scene_group": str("同场景调色匹配分组（如 S01-day / S01-dusk；传空字符串改回自动按场景资产分段）"),
+		"trim_start":  numF("手动入点秒（<0 恢复自动裁静音；>=0 锁定精确入点）"),
+		"trim_end":    numF("手动出点秒（0 恢复自动/到尾）"),
+		"j_cut":       numF("J-Cut 声音提前切入上一镜秒数（0–2）"),
+		"l_cut":       numF("L-Cut 声音延续到下一镜秒数（0–2）"),
+		"ref_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "这个镜头的手动参考图编号（构图、姿势、道具），最多 4 张；传空数组清掉"},
 	})},
 	{"view_image", "按图片编号看任意一张或几张图（画室、资产、关键帧、封面都行），返回 MCP 图片内容块（默认缩到长边 1536 像素的 JPEG；original=true 返回原图）。image_generate / generate_keyframe / generate_asset_image 返回的编号都能用。", obj(map[string]any{
 		"image_id": num("图片编号"), "image_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "多张图片编号，最多 8 张"},
@@ -148,6 +153,11 @@ type shotUpdArgs struct {
 	Assets         *[]string       `json:"assets"`
 	Duration       *float64        `json:"duration"`
 	Transition     *string         `json:"transition"`
+	SceneGroup     *string         `json:"scene_group"`
+	TrimStart      *float64        `json:"trim_start"`
+	TrimEnd        *float64        `json:"trim_end"`
+	JCut           *float64        `json:"j_cut"`
+	LCut           *float64        `json:"l_cut"`
 	RefIDs         *[]int64        `json:"ref_ids"`
 	RefImageIDs    *[]int64        `json:"ref_image_ids"`
 }
@@ -234,6 +244,7 @@ func toolUpdateShot(ctx context.Context, raw json.RawMessage) (any, error) {
 				warn = append(warn, "已有的视频不会自动重做；新描述只用于之后提交的视频")
 			}
 		}
+		warn = append(warn, h3PromptWarnings(vp, p.AudioMode != "dub")...)
 	}
 	if a.Camera != nil {
 		if c := strings.TrimSpace(*a.Camera); c == "" {
@@ -312,6 +323,47 @@ func toolUpdateShot(ctx context.Context, raw json.RawMessage) (any, error) {
 			changed = append(changed, "transition")
 		}
 	}
+	if a.SceneGroup != nil {
+		sg := strings.TrimSpace(*a.SceneGroup)
+		if sg != s.SceneGroup {
+			sets["scene_group"] = sg
+			changed = append(changed, "scene_group")
+		}
+	}
+	if a.TrimStart != nil {
+		ts := *a.TrimStart
+		if ts < 0 {
+			ts = -1
+		}
+		if ts != s.TrimStart {
+			sets["trim_start"] = ts
+			changed = append(changed, "trim_start")
+		}
+	}
+	if a.TrimEnd != nil {
+		te := *a.TrimEnd
+		if te < 0 {
+			te = 0
+		}
+		if te != s.TrimEnd {
+			sets["trim_end"] = te
+			changed = append(changed, "trim_end")
+		}
+	}
+	if a.JCut != nil {
+		jc := clampF(*a.JCut, 0, 2)
+		if jc != s.JCut {
+			sets["j_cut"] = jc
+			changed = append(changed, "j_cut")
+		}
+	}
+	if a.LCut != nil {
+		lc := clampF(*a.LCut, 0, 2)
+		if lc != s.LCut {
+			sets["l_cut"] = lc
+			changed = append(changed, "l_cut")
+		}
+	}
 	refs := a.RefIDs
 	if refs == nil {
 		refs = a.RefImageIDs
@@ -346,7 +398,8 @@ func toolUpdateShot(ctx context.Context, raw json.RawMessage) (any, error) {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM videos WHERE shot_id=?`, s.ID).Scan(&vids)
 	return map[string]any{"ok": true, "shot_id": s.ID, "code": s.Code, "changed": nonNil(changed), "warnings": nonNil(warn),
 		"shot": map[string]any{"duration": s.Duration, "camera": s.Camera, "picture": s.Action, "dialogue": s.Dialogue, "assets": s.Assets,
-			"transition": s.Chain, "keyframe_prompt": s.KeyframePrompt, "video_prompt": s.VideoPrompt, "ref_ids": refIDs},
+			"transition": s.Chain, "scene_group": s.SceneGroup, "trim_start": s.TrimStart, "trim_end": s.TrimEnd, "j_cut": s.JCut, "l_cut": s.LCut,
+			"keyframe_prompt": s.KeyframePrompt, "video_prompt": s.VideoPrompt, "ref_ids": refIDs},
 		"kept": fmt.Sprintf("保留了 %d 张关键帧候选（选用 %d）、%d 个视频", cands, s.PickedImageID, vids)}, nil
 }
 

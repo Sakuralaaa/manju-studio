@@ -548,6 +548,11 @@ type shotIn struct {
 	Transition     string          `json:"transition"`
 	KeyframePrompt string          `json:"keyframe_prompt"`
 	VideoPrompt    string          `json:"video_prompt"`
+	SceneGroup     string          `json:"scene_group"`
+	TrimStart      *float64        `json:"trim_start"`
+	TrimEnd        *float64        `json:"trim_end"`
+	JCut           *float64        `json:"j_cut"`
+	LCut           *float64        `json:"l_cut"`
 }
 
 type shotsArgs struct {
@@ -629,8 +634,9 @@ func toolSaveShots(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("这一集已有 %d 个镜头做了关键帧或视频；确认整体替换分镜请传 overwrite=true", media)
 	}
 	type row struct {
-		d                                       float64
-		cam, act, dia, kp, vp, chain, codesJSON string
+		d                                              float64
+		cam, act, dia, kp, vp, chain, codesJSON, group string
+		trimStart, trimEnd, jCut, lCut                 float64
 	}
 	var rows []row
 	var warn []string
@@ -705,7 +711,25 @@ func toolSaveShots(ctx context.Context, raw json.RawMessage) (any, error) {
 			chain = "off"
 			warn = append(warn, "第 1 镜没有上一镜头，transition 已改为 cut")
 		}
-		rows = append(rows, row{d, strings.TrimSpace(s.Camera), act, dia, kp, vp, chain, mustJSON(codes)})
+		ts := -1.0
+		if s.TrimStart != nil && *s.TrimStart >= 0 {
+			ts = *s.TrimStart
+		}
+		te := 0.0
+		if s.TrimEnd != nil && *s.TrimEnd > 0 {
+			te = *s.TrimEnd
+		}
+		jc, lc := 0.0, 0.0
+		if s.JCut != nil {
+			jc = clampF(*s.JCut, 0, 2)
+		}
+		if s.LCut != nil {
+			lc = clampF(*s.LCut, 0, 2)
+		}
+		for _, w := range h3PromptWarnings(vp, p.AudioMode != "dub") {
+			warn = append(warn, fmt.Sprintf("第 %d 镜：%s", n, w))
+		}
+		rows = append(rows, row{d, strings.TrimSpace(s.Camera), act, dia, kp, vp, chain, mustJSON(codes), strings.TrimSpace(s.SceneGroup), ts, te, jc, lc})
 	}
 	if p.EpisodeSec > 0 && (total < float64(p.EpisodeSec)*0.6 || total > float64(p.EpisodeSec)*1.5) {
 		warn = append(warn, fmt.Sprintf("分镜总时长 %.0f 秒，作品设定单集约 %d 秒", total, p.EpisodeSec))
@@ -727,8 +751,8 @@ func toolSaveShots(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	for i, r := range rows {
-		if _, err := tx.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			p.ID, e.ID, i+1, r.d, r.cam, r.act, r.dia, r.codesJSON, r.kp, r.vp, r.chain, now()); err != nil {
+		if _, err := tx.Exec(`INSERT INTO shots(project_id,episode_id,sort,duration,camera,action,dialogue,asset_codes,keyframe_prompt,video_prompt,chain,scene_group,trim_start,trim_end,j_cut,l_cut,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			p.ID, e.ID, i+1, r.d, r.cam, r.act, r.dia, r.codesJSON, r.kp, r.vp, r.chain, r.group, r.trimStart, r.trimEnd, r.jCut, r.lCut, now()); err != nil {
 			return nil, err
 		}
 	}
@@ -1876,8 +1900,13 @@ var writerTools = []mcpTool{
 			}, "speaker", "text"))}},
 			"assets":          arr("出现的资产编号或名称", map[string]any{"type": "string"}),
 			"transition":      map[string]any{"type": "string", "enum": []string{"cut", "continuous", "first_last"}},
+			"scene_group":     str("同场景调色匹配分组（如 S01-day / S01-dusk，可选，留空按场景资产自动分段）"),
+			"trim_start":      numF("手动入点秒（可选，不填/负数=成片时自动裁开头静音）"),
+			"trim_end":        numF("手动出点秒（可选，0=自动/到尾）"),
+			"j_cut":           numF("J-Cut 声音提前切入上一镜的秒数（0–2，可选）"),
+			"l_cut":           numF("L-Cut 声音延续到下一镜的秒数（0–2，可选）"),
 			"keyframe_prompt": str("关键帧中文生图提示词：构图、景别、人物位置与表情、光线，直接用资产名称指代角色和场景"),
-			"video_prompt":    str("图生视频中文描述：从关键帧开始的动作、镜头运动、环境动态和声音，不重复静态外观"),
+			"video_prompt":    str("图生视频描述（推荐纯英文避免 H3 误念中文动作说明，或直接手写官方英文 integrated_multimodal_description:）"),
 		}, "duration", "camera", "picture", "keyframe_prompt", "video_prompt")),
 	}, "episode_id", "shots")},
 	{"save_episode_summary", "写入本集摘要（80–150 字，按时间顺序写清发生了什么、关系和处境变化、新人物与线索）和卡点，供后面各集参考。", obj(map[string]any{
